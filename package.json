@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "A starter template for creating playable ads using Phaser and @smoud/playable-sdk with TypeScript support",
   "scripts": {
-    "dev": "playable-scripts dev",
+    "dev": "playable-scripts dev --port 3001",
     "build": "playable-scripts build"
   },
   "keywords": [
