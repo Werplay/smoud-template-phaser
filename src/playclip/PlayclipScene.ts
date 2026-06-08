@@ -90,7 +90,7 @@ interface Overlay {
   clicked: boolean;
 }
 
-// Timeline control (loop / jump). Freeze is still deferred.
+// Timeline control (loop / jump / freeze).
 interface Control {
   id: string;
   startTime: number;
@@ -99,7 +99,12 @@ interface Control {
 
 // Core subset of asset types this scene renders. Audio, transparent-button
 // and endcard are intentionally deferred.
-const SUPPORTED_TYPES: PlayclipAsset['type'][] = ['text', 'image', 'button'];
+const SUPPORTED_TYPES: PlayclipAsset['type'][] = [
+  'text',
+  'image',
+  'button',
+  'transparent-button',
+];
 
 // ---------------------------------------------------------------------------
 // Scene
@@ -120,7 +125,6 @@ export class PlayclipScene extends Phaser.Scene {
   private lastVideoKey: string | null = null;
 
   private orientation: Orientation = 'landscape';
-  private pausedForButtonId: string | null = null;
   // The playable holds on its first frame until the first tap anywhere.
   private started = false;
   private posterHeld = false;
@@ -128,8 +132,13 @@ export class PlayclipScene extends Phaser.Scene {
   // Timeline controls (seek-based playback behaviour).
   private loops: Control[] = [];
   private jumps: Control[] = [];
+  private freezes: Control[] = [];
   private currentLoop: Control | null = null;
   private currentJump: Control | null = null;
+  private currentFreeze: Control | null = null;
+  // Freeze ids already stopped on; kept until the playhead leaves their window so
+  // breaking out of a freeze doesn't immediately re-trap it.
+  private triggeredFreezes = new Set<string>();
 
   constructor() {
     super({ key: 'PlayclipScene' });
@@ -185,6 +194,7 @@ export class PlayclipScene extends Phaser.Scene {
     this.assets = this.rawAssets().filter((a) => SUPPORTED_TYPES.includes(a.type));
     this.loops = this.rawControls('loops');
     this.jumps = this.rawControls('jumps');
+    this.freezes = this.rawControls('freezes');
     this.orientation = this.computeOrientation();
 
     this.createVideo();
@@ -230,14 +240,16 @@ export class PlayclipScene extends Phaser.Scene {
 
     // The loader prepares the element but the intrinsic dimensions
     // (videoWidth/videoHeight) aren't known until metadata/first frame are
-    // ready. Until then layoutVideo() falls back to the full game rect and the
-    // video looks stretched. Re-layout as soon as the real size is available so
-    // it's correct on launch rather than only after the first resize.
+    // ready. Until then the video rect falls back to the full game rect, so both
+    // the video AND every overlay (which are positioned/sized relative to that
+    // rect) are laid out wrong. Re-layout EVERYTHING — via relayout(), not just
+    // layoutVideo() — as soon as the real size is available so assets are correct
+    // on launch rather than only after the first resize.
     const el = video.video as HTMLVideoElement | undefined;
     if (el && !el.videoWidth) {
-      el.addEventListener('loadedmetadata', () => this.layoutVideo(), { once: true });
+      el.addEventListener('loadedmetadata', () => this.relayout(), { once: true });
     }
-    video.once(Phaser.GameObjects.Events.VIDEO_CREATED, () => this.layoutVideo());
+    video.once(Phaser.GameObjects.Events.VIDEO_CREATED, () => this.relayout());
 
     // A loaded-but-unplayed Phaser video renders nothing, so briefly play
     // (muted) to decode the first frame, then update() pauses on it as the
@@ -281,6 +293,8 @@ export class PlayclipScene extends Phaser.Scene {
       if (asset.type === 'text') overlay = this.buildText(asset);
       else if (asset.type === 'image') overlay = this.buildImage(asset);
       else if (asset.type === 'button') overlay = this.buildButton(asset);
+      else if (asset.type === 'transparent-button')
+        overlay = this.buildTransparentButton(asset);
       if (overlay) {
         overlay.root.setVisible(false);
         this.overlays.push(overlay);
@@ -428,23 +442,73 @@ export class PlayclipScene extends Phaser.Scene {
     return overlay;
   }
 
+  // A transparent-button is an invisible clickable area (commonly the CTA). It
+  // renders nothing but occupies a hit region sized from its width/height
+  // percentages; the tap is dispatched from onPointerDown like a normal button.
+  private buildTransparentButton(asset: PlayclipAsset): Overlay {
+    const container = this.add.container(0, 0).setDepth(25);
+
+    return {
+      asset,
+      root: container,
+      clicked: false,
+      layout: (rect, orientation) => {
+        const wPct = this.widthPct(asset, orientation);
+        const hPct = this.heightPct(asset, orientation);
+        const bw = wPct ? wPct * rect.width : rect.width * 0.4;
+        const bh = hPct ? hPct * rect.height : rect.height * 0.1;
+        const c = this.centerOf(asset, rect, orientation);
+        container.setPosition(c.x, c.y);
+        // Drives the hit-test in onPointerDown (centre ± displayWidth/2).
+        container.setSize(bw, bh);
+      },
+    };
+  }
+
   // --- Interaction --------------------------------------------------------
 
+  // An overlay accepts taps if it's a button, a transparent-button, or an image
+  // with a configured action. (Static images without an action stay non-interactive.)
+  private isInteractive(overlay: Overlay): boolean {
+    return (
+      overlay.asset.type === 'button' ||
+      overlay.asset.type === 'transparent-button' ||
+      (overlay.asset.type === 'image' && !!overlay.asset.buttonAction)
+    );
+  }
+
   // Single entry point for all taps. The very first tap anywhere only starts
-  // the ad; later taps are routed to whatever button was hit.
-  private onPointerDown(
-    _pointer: Phaser.Input.Pointer,
-    currentlyOver: Phaser.GameObjects.GameObject[],
-  ): void {
+  // the ad; later taps are routed to whatever interactive overlay was hit.
+  private onPointerDown(pointer: Phaser.Input.Pointer): void {
     if (!this.started) {
       this.startPlayback();
       return;
     }
+    // Hit-test against each overlay's actual drawn rectangle (centre ± half its
+    // display size) rather than Phaser's `currentlyOver`. A button is a Container
+    // whose only sized child is a Graphics object, which reports no measurable
+    // bounds — so relying on the container's auto hit area / getBounds() leaves
+    // the clickable region not matching what's drawn. Both Containers and Images
+    // are centre-origin, so centre ± displayWidth/2 covers each case uniformly.
+    const px = pointer.worldX;
+    const py = pointer.worldY;
     for (const overlay of this.overlays) {
+      if (!this.isInteractive(overlay) || overlay.clicked) continue;
+      const node = overlay.root as unknown as {
+        x: number;
+        y: number;
+        displayWidth: number;
+        displayHeight: number;
+        visible: boolean;
+      };
+      if (!node.visible) continue;
+      const halfW = node.displayWidth / 2;
+      const halfH = node.displayHeight / 2;
       if (
-        overlay.asset.type === 'button' &&
-        !overlay.clicked &&
-        currentlyOver.includes(overlay.root as Phaser.GameObjects.GameObject)
+        px >= node.x - halfW &&
+        px <= node.x + halfW &&
+        py >= node.y - halfH &&
+        py <= node.y + halfH
       ) {
         this.activateButton(overlay);
         break;
@@ -466,18 +530,58 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   private activateButton(overlay: Overlay): void {
+    // Debounce a single appearance of the button; this is re-armed in update()
+    // once the button leaves its time window (so it can be pressed again if its
+    // range comes back around). It does NOT drive visibility — see update().
     overlay.clicked = true;
 
+    const v = this.video;
     const action = overlay.asset.buttonAction;
-    if (action?.type === 'seek' && typeof action.seekTime === 'number' && this.video) {
-      this.video.setCurrentTime(action.seekTime);
-      this.video.setPaused(false);
-    } else if (action?.type === 'play' && this.video) {
-      this.video.setPaused(false);
-    } else {
-      // cta (or unspecified): hand off to the network SDK's store routing.
-      // Per-playable store links are baked into build.json at build time.
+
+    // Pressing any button breaks out of an active freeze and resumes playback.
+    // The freeze stays in triggeredFreezes so it won't immediately re-trap as the
+    // playhead plays back out through its window.
+    if (this.currentFreeze && v) {
+      this.currentFreeze = null;
+      v.setPaused(false);
+    }
+
+    if (action?.type === 'seek' && typeof action.seekTime === 'number' && v) {
+      // Seeking outside an active loop/jump breaks out of it (mirrors the HTML
+      // runtime's handleButtonClick loop-breakout behaviour).
+      if (
+        this.currentLoop &&
+        (action.seekTime < this.currentLoop.startTime ||
+          action.seekTime > this.currentLoop.endTime)
+      ) {
+        this.currentLoop = null;
+      }
+      this.currentJump = null;
+      v.setCurrentTime(action.seekTime);
+      v.setPaused(false);
+      return;
+    }
+
+    if (action?.type === 'cta') {
+      // Hand off to the network SDK's store routing. Per-playable store links are
+      // baked into build.json at build time.
       sdk.install();
+      return;
+    }
+
+    // 'play' (or unspecified): advance so the video continues past the button.
+    // If a loop is currently holding the playhead inside the button's window,
+    // break out of it by seeking just past the loop end — otherwise the loop
+    // would immediately re-engage (it re-activates whenever the playhead is in
+    // range) and the button would never leave its time window.
+    if (v) {
+      if (this.currentLoop) {
+        const resumeAt = this.currentLoop.endTime + 0.001;
+        this.currentLoop = null;
+        v.setCurrentTime(resumeAt);
+      }
+      this.currentJump = null;
+      v.setPaused(false);
     }
   }
 
@@ -494,32 +598,27 @@ export class PlayclipScene extends Phaser.Scene {
         this.posterHeld = true;
       }
     } else if (ready) {
-      // Loops/jumps may seek the playhead before we evaluate visibility.
-      this.applyLoopsAndJumps(v!);
+      // A freeze holds the playhead until a button breaks out of it; while held,
+      // don't let loops/jumps move it. Otherwise loops/jumps may seek the
+      // playhead before we evaluate visibility.
+      if (!this.currentFreeze) this.applyLoopsAndJumps(v!);
+      this.applyFreezes(v!);
     }
 
     const t = ready ? v!.getCurrentTime() : 0;
-    let activeButton: Overlay | null = null;
 
     for (const overlay of this.overlays) {
       const start = overlay.asset.time;
       const end = overlay.asset.endTime || overlay.asset.time + 5;
       const within = t >= start && t <= end;
-      const isButton = overlay.asset.type === 'button';
-      const show = isButton ? within && !overlay.clicked : within;
-      overlay.root.setVisible(show);
-      if (isButton && show && !activeButton) activeButton = overlay;
-    }
-
-    // Button-pause: hold the video while an unclicked button is on screen.
-    if (ready && this.started) {
-      if (activeButton) {
-        if (!v!.isPaused()) v!.setPaused(true);
-        this.pausedForButtonId = activeButton.asset.id;
-      } else if (this.pausedForButtonId) {
-        this.pausedForButtonId = null;
-        if (v!.isPaused()) v!.setPaused(false);
-      }
+      // Visibility is driven purely by the playhead vs. the asset's time window.
+      // Buttons are NOT permanently hidden once pressed — pressing a button
+      // advances the playhead out of its window (see activateButton), which is
+      // what makes it disappear.
+      overlay.root.setVisible(within);
+      // Re-arm an interactive overlay once it leaves its window so it can be
+      // pressed again if its time range comes back around (e.g. a looping intro).
+      if (this.isInteractive(overlay) && !within) overlay.clicked = false;
     }
   }
 
@@ -558,6 +657,46 @@ export class PlayclipScene extends Phaser.Scene {
     }
   }
 
+  // A freeze stops the video at its startTime and holds it there until a button
+  // is pressed to break out (see activateButton). Mirrors the HTML runtime's
+  // checkFreezes: once broken out of, the freeze stays in triggeredFreezes so it
+  // doesn't immediately re-trap as the playhead plays back out through its window,
+  // and re-arms once the playhead leaves the window.
+  private applyFreezes(v: Phaser.GameObjects.Video): void {
+    if (this.freezes.length === 0) return;
+    // Loops and jumps take priority over freezes.
+    if (this.currentLoop || this.currentJump) return;
+    const t = v.getCurrentTime();
+
+    if (this.currentFreeze) {
+      // Release the freeze only if the playhead has moved outside its window
+      // (e.g. a seek action). Otherwise keep the frame held.
+      if (t < this.currentFreeze.startTime || t > this.currentFreeze.endTime + 0.1) {
+        this.currentFreeze = null;
+      } else if (!v.isPaused()) {
+        v.setPaused(true);
+      }
+      return;
+    }
+
+    // Re-arm freezes once the playhead has left their window.
+    this.freezes.forEach((f) => {
+      if (this.triggeredFreezes.has(f.id) && (t < f.startTime || t > f.endTime + 0.1)) {
+        this.triggeredFreezes.delete(f.id);
+      }
+    });
+
+    // Stop at the start of the first not-yet-triggered freeze and hold there.
+    const found = this.freezes.find(
+      (f) => t >= f.startTime && t <= f.endTime && !this.triggeredFreezes.has(f.id),
+    );
+    if (found) {
+      this.currentFreeze = found;
+      this.triggeredFreezes.add(found.id);
+      v.setPaused(true);
+    }
+  }
+
   private relayout = (): void => {
     this.orientation = this.computeOrientation();
     this.maybeSwapVideoSource();
@@ -572,8 +711,8 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   resumeVideo(): void {
-    // Don't fight the button-pause hold.
-    if (!this.pausedForButtonId) this.video?.setPaused(false);
+    // Don't fight an active freeze hold (the SDK may resume on app foreground).
+    if (!this.currentFreeze) this.video?.setPaused(false);
   }
 
   setVolumeLevel(value: number): void {
