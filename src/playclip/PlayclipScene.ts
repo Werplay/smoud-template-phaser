@@ -88,6 +88,12 @@ interface Overlay {
   };
   layout: (rect: Rect, orientation: Orientation) => void;
   clicked: boolean;
+  // Visibility tracking for entry/exit animation transitions.
+  wasVisible: boolean;
+  // Called when the asset enters its time window (image overlays only).
+  onShow?: () => void;
+  // Called when the asset leaves its time window; invoke done() to actually hide.
+  onHide?: (done: () => void) => void;
 }
 
 // Timeline control (loop / jump / freeze).
@@ -343,6 +349,7 @@ export class PlayclipScene extends Phaser.Scene {
       asset,
       root: text,
       clicked: false,
+      wasVisible: false,
       layout: (rect, orientation) => {
         const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
         text.setFontSize(st.fontSize || 24);
@@ -360,11 +367,262 @@ export class PlayclipScene extends Phaser.Scene {
       : this.add.image(0, 0, '__MISSING');
     image.setOrigin(0.5).setDepth(10);
 
-    return {
+    // Base position/scale updated by layout() on every resize.
+    let baseX = 0;
+    let baseY = 0;
+    let baseScaleX = 1;
+    let baseScaleY = 1;
+
+    // Resolve CSS easing name to a Phaser ease string.
+    const toEase = (css?: string): string => {
+      const m: Record<string, string> = {
+        linear: 'Linear',
+        'ease-in': 'Sine.easeIn',
+        'ease-out': 'Sine.easeOut',
+        'ease-in-out': 'Sine.easeInOut',
+      };
+      return m[css ?? ''] ?? 'Sine.easeInOut';
+    };
+
+    const getStyle = (): AssetStyle | undefined =>
+      (pickOriented(asset.style, this.orientation) || undefined) as AssetStyle | undefined;
+
+    // Kill all tweens targeting this image (loop + any ongoing transition).
+    const killAll = (): void => {
+      this.tweens.killTweensOf(image);
+    };
+
+    // Reset image to the clean base state (position/scale/alpha/angle).
+    const resetToBase = (): void => {
+      image.setPosition(baseX, baseY);
+      image.setScale(baseScaleX, baseScaleY);
+      image.setAlpha(1);
+      image.setAngle(0);
+    };
+
+    // Start an infinite looping animation based on animationStyle.
+    // Default speeds match the CSS animation-duration values defined in css-builder.ts.
+    // gestureSpeed overrides the default when the user has set it explicitly.
+    const startLoop = (): void => {
+      const style = getStyle();
+      const anim = style?.animationStyle;
+      if (!anim || anim === 'none') return;
+
+      // Per-type default durations mirroring the CSS (css-builder.ts hardcoded values).
+      // Gesture animations (tap/swipe/circle) use gestureSpeed; static ones use fixed CSS defaults.
+      const DEFAULT_SPEED: Record<string, number> = {
+        glow: 2000, pulse: 1500, bounce: 800, shake: 500, float: 3000,
+        tap: 1200, swipeLeft: 1400, swipeRight: 1400, swipeUp: 1400, swipeDown: 1400, circle: 2000,
+      };
+      const speed = style?.gestureSpeed ?? DEFAULT_SPEED[anim] ?? 1400;
+      // gestureDistance is px for swipe/circle and 0-100 (depth %) for tap.
+      const dist = style?.gestureDistance ?? 24;
+
+      // CSS applies a single ease-in-out to the whole animation; all Phaser tween
+      // segments use the same easing to replicate that behaviour.
+      const E = 'Sine.easeInOut';
+
+      switch (anim) {
+        case 'glow': {
+          // Use Phaser's Glow FX in WebGL; fall back to alpha pulse in Canvas.
+          const glow = image.preFX?.addGlow(0x3b82f6, 4, 0, false);
+          if (glow) {
+            this.tweens.add({ targets: glow, outerStrength: 12, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
+          } else {
+            this.tweens.add({ targets: image, alpha: 0.65, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
+          }
+          break;
+        }
+        case 'pulse':
+          // CSS: scale(1) → scale(1.05) → scale(1), 1.5s ease-in-out
+          this.tweens.add({ targets: image, scaleX: baseScaleX * 1.05, scaleY: baseScaleY * 1.05, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
+          break;
+        case 'bounce':
+          // CSS: translateY(0) → translateY(-5px) → translateY(0), 0.8s ease-in-out
+          this.tweens.add({ targets: image, y: baseY - 5, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
+          break;
+        case 'shake':
+          // CSS keyframes at 0%, 25%, 75%, 100% with hardcoded ±2px, 0.5s ease-in-out
+          this.tweens.chain({ loop: -1, tweens: [
+            { targets: image, x: baseX - 2, duration: speed * 0.25, ease: E },
+            { targets: image, x: baseX + 2, duration: speed * 0.5,  ease: E },
+            { targets: image, x: baseX,     duration: speed * 0.25, ease: E },
+          ]});
+          break;
+        case 'float':
+          // CSS: translateY(0) rotate(0) → translateY(-3px) rotate(1deg) → back, 3s ease-in-out
+          this.tweens.add({ targets: image, y: baseY - 3, angle: 1, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
+          break;
+        case 'tap': {
+          // CSS keyframes at 0%, 40%, 65%, 100%; gestureDistance is 0-100 depth %.
+          // HTML builder converts: --gesture-tap-depth = Math.min(1, gestureDistance / 100)
+          const tapDist = style?.gestureDistance ?? 18;
+          const depth = Math.min(1, tapDist / 100);
+          this.tweens.chain({ loop: -1, tweens: [
+            { targets: image, scaleX: baseScaleX * (1 - depth), scaleY: baseScaleY * (1 - depth), duration: speed * 0.4,  ease: E },
+            { targets: image, scaleX: baseScaleX * 1.04,        scaleY: baseScaleY * 1.04,        duration: speed * 0.25, ease: E },
+            { targets: image, scaleX: baseScaleX,               scaleY: baseScaleY,               duration: speed * 0.35, ease: E },
+          ]});
+          break;
+        }
+        case 'swipeLeft':
+          // CSS keyframes: 0%=0, 20%=+dist*0.33, 70%=-dist, 100%=0; ease-in-out
+          this.tweens.chain({ loop: -1, tweens: [
+            { targets: image, x: baseX + dist * 0.33, duration: speed * 0.2, ease: E },
+            { targets: image, x: baseX - dist,        duration: speed * 0.5, ease: E },
+            { targets: image, x: baseX,               duration: speed * 0.3, ease: E },
+          ]});
+          break;
+        case 'swipeRight':
+          // CSS keyframes: 0%=0, 20%=-dist*0.33, 70%=+dist, 100%=0; ease-in-out
+          this.tweens.chain({ loop: -1, tweens: [
+            { targets: image, x: baseX - dist * 0.33, duration: speed * 0.2, ease: E },
+            { targets: image, x: baseX + dist,        duration: speed * 0.5, ease: E },
+            { targets: image, x: baseX,               duration: speed * 0.3, ease: E },
+          ]});
+          break;
+        case 'swipeUp':
+          // CSS keyframes: 0%=0, 20%=+dist*0.33, 70%=-dist, 100%=0; ease-in-out
+          this.tweens.chain({ loop: -1, tweens: [
+            { targets: image, y: baseY + dist * 0.33, duration: speed * 0.2, ease: E },
+            { targets: image, y: baseY - dist,        duration: speed * 0.5, ease: E },
+            { targets: image, y: baseY,               duration: speed * 0.3, ease: E },
+          ]});
+          break;
+        case 'swipeDown':
+          // CSS keyframes: 0%=0, 20%=-dist*0.33, 70%=+dist, 100%=0; ease-in-out
+          this.tweens.chain({ loop: -1, tweens: [
+            { targets: image, y: baseY - dist * 0.33, duration: speed * 0.2, ease: E },
+            { targets: image, y: baseY + dist,        duration: speed * 0.5, ease: E },
+            { targets: image, y: baseY,               duration: speed * 0.3, ease: E },
+          ]});
+          break;
+        case 'circle': {
+          // CSS: linear ease (smooth circular path), keyframes at 0%/25%/50%/75%/100%
+          const r = dist || 14;
+          this.tweens.chain({ loop: -1, tweens: [
+            { targets: image, x: baseX + r, y: baseY - r,        duration: speed * 0.25, ease: 'Linear' },
+            { targets: image, x: baseX,     y: baseY - r * 1.57, duration: speed * 0.25, ease: 'Linear' },
+            { targets: image, x: baseX - r, y: baseY - r,        duration: speed * 0.25, ease: 'Linear' },
+            { targets: image, x: baseX,     y: baseY,             duration: speed * 0.25, ease: 'Linear' },
+          ]});
+          break;
+        }
+      }
+    };
+
+    // Play a one-shot entry animation; call onComplete when done (or immediately if none).
+    const playEntry = (onComplete: () => void): void => {
+      const style = getStyle();
+      const entry = style?.entryAnimation;
+      if (!entry || entry === 'none') { onComplete(); return; }
+
+      const dur  = style?.animationDuration ?? 500;
+      const ease = toEase(style?.animationEasing);
+      const opFrom   = style?.animationOpacityFrom  ?? 0;
+      const opTo     = style?.animationOpacityTo    ?? 1;
+      const scFrom   = style?.animationScaleFrom    ?? 0;
+      const scTo     = style?.animationScaleTo      ?? 1;
+      const slideDist = style?.animationSlideDistance ?? 100;
+
+      switch (entry) {
+        case 'fadeIn':
+          image.setAlpha(opFrom);
+          this.tweens.add({ targets: image, alpha: opTo, duration: dur, ease, onComplete });
+          break;
+        case 'slideInLeft':
+          image.setAlpha(0.6).setPosition(baseX - slideDist, baseY);
+          this.tweens.add({ targets: image, x: baseX, alpha: 1, duration: dur, ease, onComplete });
+          break;
+        case 'slideInRight':
+          image.setAlpha(0.6).setPosition(baseX + slideDist, baseY);
+          this.tweens.add({ targets: image, x: baseX, alpha: 1, duration: dur, ease, onComplete });
+          break;
+        case 'slideInTop':
+          image.setAlpha(0.6).setPosition(baseX, baseY - slideDist);
+          this.tweens.add({ targets: image, y: baseY, alpha: 1, duration: dur, ease, onComplete });
+          break;
+        case 'slideInBottom':
+          image.setAlpha(0.6).setPosition(baseX, baseY + slideDist);
+          this.tweens.add({ targets: image, y: baseY, alpha: 1, duration: dur, ease, onComplete });
+          break;
+        case 'scaleIn':
+          image.setAlpha(0.5).setScale(baseScaleX * scFrom, baseScaleY * scFrom);
+          this.tweens.add({ targets: image, scaleX: baseScaleX * scTo, scaleY: baseScaleY * scTo, alpha: 1, duration: dur, ease, onComplete });
+          break;
+        case 'bounceIn':
+          image.setAlpha(0).setScale(baseScaleX * scFrom, baseScaleY * scFrom);
+          this.tweens.add({ targets: image, scaleX: baseScaleX * scTo, scaleY: baseScaleY * scTo, alpha: 1, duration: dur, ease: 'Bounce.easeOut', onComplete });
+          break;
+        default:
+          onComplete();
+      }
+    };
+
+    // Play a one-shot exit animation; call done() when the image should be hidden.
+    const playExit = (done: () => void): void => {
+      const style = getStyle();
+      const exit = style?.exitAnimation;
+      if (!exit || exit === 'none') { done(); return; }
+
+      const dur  = style?.animationDuration ?? 500;
+      const ease = toEase(style?.animationEasing);
+      const opTo      = style?.animationOpacityTo    ?? 0;
+      const scTo      = style?.animationScaleTo      ?? 0;
+      const slideDist = style?.animationSlideDistance ?? 100;
+
+      switch (exit) {
+        case 'fadeOut':
+          this.tweens.add({ targets: image, alpha: opTo, duration: dur, ease, onComplete: done });
+          break;
+        case 'slideOutLeft':
+          this.tweens.add({ targets: image, x: baseX - slideDist, alpha: 0.6, duration: dur, ease, onComplete: done });
+          break;
+        case 'slideOutRight':
+          this.tweens.add({ targets: image, x: baseX + slideDist, alpha: 0.6, duration: dur, ease, onComplete: done });
+          break;
+        case 'slideOutTop':
+          this.tweens.add({ targets: image, y: baseY - slideDist, alpha: 0.6, duration: dur, ease, onComplete: done });
+          break;
+        case 'slideOutBottom':
+          this.tweens.add({ targets: image, y: baseY + slideDist, alpha: 0.6, duration: dur, ease, onComplete: done });
+          break;
+        case 'scaleOut':
+          this.tweens.add({ targets: image, scaleX: baseScaleX * scTo, scaleY: baseScaleY * scTo, alpha: 0.5, duration: dur, ease, onComplete: done });
+          break;
+        default:
+          done();
+      }
+    };
+
+    // Build the overlay; layout is assigned after so it can close over `overlay`.
+    const overlay: Overlay = {
       asset,
       root: image,
       clicked: false,
+      wasVisible: false,
+
+      onShow: () => {
+        // Cancel any in-flight tweens (e.g. a stale exit animation), reset to
+        // the clean base state, then play the entry anim and start the loop.
+        killAll();
+        resetToBase();
+        playEntry(() => startLoop());
+      },
+
+      onHide: (done) => {
+        // Stop the looping animation, then play the exit anim before hiding.
+        // If onShow is called before done() fires, killAll() in onShow kills the
+        // exit tween so done() (and therefore setVisible(false)) never runs.
+        killAll();
+        playExit(done);
+      },
+
       layout: (rect, orientation) => {
+        // Kill every tween first — both loop and any in-flight transition tween.
+        killAll();
+
+        // Existing responsiveness logic (unchanged).
         const wPct = this.widthPct(asset, orientation);
         const hPct = this.heightPct(asset, orientation);
         const w = wPct ? wPct * rect.width : undefined;
@@ -381,8 +639,29 @@ export class PlayclipScene extends Phaser.Scene {
 
         const c = this.centerOf(asset, rect, orientation);
         image.setPosition(c.x, c.y);
+
+        // Update base values that animations use as their origin.
+        baseX = c.x;
+        baseY = c.y;
+        baseScaleX = image.scaleX;
+        baseScaleY = image.scaleY;
+
+        // Reset any animated state so the image is clean after a resize.
+        image.setAlpha(1).setAngle(0);
+
+        // Re-derive whether this asset should be visible right now (recovers from
+        // any killed exit-animation that never called setVisible(false)).
+        const t = (this.video?.getCurrentTime?.() ?? 0) as number;
+        const within = t >= asset.time && t <= (asset.endTime || asset.time + 5);
+        image.setVisible(within);
+        overlay.wasVisible = within;
+
+        // Restart the loop animation at the new base position if visible.
+        if (within) startLoop();
       },
     };
+
+    return overlay;
   }
 
   private buildButton(asset: PlayclipAsset): Overlay {
@@ -395,6 +674,7 @@ export class PlayclipScene extends Phaser.Scene {
       asset,
       root: container,
       clicked: false,
+      wasVisible: false,
       layout: (rect, orientation) => {
         const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
 
@@ -452,6 +732,7 @@ export class PlayclipScene extends Phaser.Scene {
       asset,
       root: container,
       clicked: false,
+      wasVisible: false,
       layout: (rect, orientation) => {
         const wPct = this.widthPct(asset, orientation);
         const hPct = this.heightPct(asset, orientation);
@@ -611,11 +892,25 @@ export class PlayclipScene extends Phaser.Scene {
       const start = overlay.asset.time;
       const end = overlay.asset.endTime || overlay.asset.time + 5;
       const within = t >= start && t <= end;
-      // Visibility is driven purely by the playhead vs. the asset's time window.
-      // Buttons are NOT permanently hidden once pressed — pressing a button
-      // advances the playhead out of its window (see activateButton), which is
-      // what makes it disappear.
-      overlay.root.setVisible(within);
+
+      // Transition-based visibility: only act on state changes so that image
+      // overlays can play entry/exit animations instead of snapping.
+      if (within && !overlay.wasVisible) {
+        overlay.wasVisible = true;
+        overlay.root.setVisible(true);
+        overlay.onShow?.();
+      } else if (!within && overlay.wasVisible) {
+        overlay.wasVisible = false;
+        if (overlay.onHide) {
+          // Image overlays play an exit animation; done() hides the image.
+          // If onShow fires before done() runs, killAll() in onShow kills the
+          // exit tween so done() never fires — no spurious hide.
+          overlay.onHide(() => overlay.root.setVisible(false));
+        } else {
+          overlay.root.setVisible(false);
+        }
+      }
+
       // Re-arm an interactive overlay once it leaves its window so it can be
       // pressed again if its time range comes back around (e.g. a looping intro).
       if (this.isInteractive(overlay) && !within) overlay.clicked = false;
