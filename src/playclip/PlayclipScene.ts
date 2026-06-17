@@ -466,35 +466,31 @@ export class PlayclipScene extends Phaser.Scene {
           break;
         }
         case 'swipeLeft':
-          // CSS keyframes: 0%=0, 20%=+dist*0.33, 70%=-dist, 100%=0; ease-in-out
+          // CSS keyframes: 0%=0, 60%=-dist, 100%=0; ease-in-out
           this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX + dist * 0.33, duration: speed * 0.2, ease: E },
-            { targets: image, x: baseX - dist,        duration: speed * 0.5, ease: E },
-            { targets: image, x: baseX,               duration: speed * 0.3, ease: E },
+            { targets: image, x: baseX - dist, duration: speed * 0.6, ease: E },
+            { targets: image, x: baseX,        duration: speed * 0.4, ease: E },
           ]});
           break;
         case 'swipeRight':
-          // CSS keyframes: 0%=0, 20%=-dist*0.33, 70%=+dist, 100%=0; ease-in-out
+          // CSS keyframes: 0%=0, 60%=+dist, 100%=0; ease-in-out
           this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX - dist * 0.33, duration: speed * 0.2, ease: E },
-            { targets: image, x: baseX + dist,        duration: speed * 0.5, ease: E },
-            { targets: image, x: baseX,               duration: speed * 0.3, ease: E },
+            { targets: image, x: baseX + dist, duration: speed * 0.6, ease: E },
+            { targets: image, x: baseX,        duration: speed * 0.4, ease: E },
           ]});
           break;
         case 'swipeUp':
-          // CSS keyframes: 0%=0, 20%=+dist*0.33, 70%=-dist, 100%=0; ease-in-out
+          // CSS keyframes: 0%=0, 60%=-dist, 100%=0; ease-in-out
           this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, y: baseY + dist * 0.33, duration: speed * 0.2, ease: E },
-            { targets: image, y: baseY - dist,        duration: speed * 0.5, ease: E },
-            { targets: image, y: baseY,               duration: speed * 0.3, ease: E },
+            { targets: image, y: baseY - dist, duration: speed * 0.6, ease: E },
+            { targets: image, y: baseY,        duration: speed * 0.4, ease: E },
           ]});
           break;
         case 'swipeDown':
-          // CSS keyframes: 0%=0, 20%=-dist*0.33, 70%=+dist, 100%=0; ease-in-out
+          // CSS keyframes: 0%=0, 60%=+dist, 100%=0; ease-in-out
           this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, y: baseY - dist * 0.33, duration: speed * 0.2, ease: E },
-            { targets: image, y: baseY + dist,        duration: speed * 0.5, ease: E },
-            { targets: image, y: baseY,               duration: speed * 0.3, ease: E },
+            { targets: image, y: baseY + dist, duration: speed * 0.6, ease: E },
+            { targets: image, y: baseY,        duration: speed * 0.4, ease: E },
           ]});
           break;
         case 'circle': {
