@@ -367,6 +367,9 @@ export class PlayclipScene extends Phaser.Scene {
         text.setColor(st.color || '#ffffff');
         const c = this.centerOf(asset, rect, orientation);
         text.setPosition(c.x, c.y);
+        text.setAngle(st.rotation || 0);
+        text.setFlipX(!!st.flipX);
+        text.setFlipY(!!st.flipY);
       },
     };
   }
@@ -406,12 +409,15 @@ export class PlayclipScene extends Phaser.Scene {
       this.tweens.killTweensOf(image);
     };
 
-    // Reset image to the clean base state (position/scale/alpha/angle).
+    // Reset image to the clean base state (position/scale/alpha/angle/flip).
     const resetToBase = (): void => {
+      const st = getStyle();
       image.setPosition(baseX, baseY);
       image.setScale(baseScaleX, baseScaleY);
       image.setAlpha(1);
-      image.setAngle(0);
+      image.setAngle(st?.rotation || 0);
+      image.setFlipX(!!st?.flipX);
+      image.setFlipY(!!st?.flipY);
     };
 
     // Start an infinite looping animation based on animationStyle.
@@ -662,8 +668,12 @@ export class PlayclipScene extends Phaser.Scene {
         baseScaleY = image.scaleY;
         layoutRect = rect;
 
-        // Reset any animated state so the image is clean after a resize.
-        image.setAlpha(1).setAngle(0);
+        // Reset any animated state so the image is clean after a resize, then
+        // re-apply the asset's static rotation/flip for this orientation.
+        const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
+        image.setAlpha(1).setAngle(st.rotation || 0);
+        image.setFlipX(!!st.flipX);
+        image.setFlipY(!!st.flipY);
 
         // Re-derive whether this asset should be visible right now (recovers from
         // any killed exit-animation that never called setVisible(false)).
@@ -722,6 +732,9 @@ export class PlayclipScene extends Phaser.Scene {
         const c = this.centerOf(asset, rect, orientation);
         container.setPosition(c.x, c.y);
         container.setSize(bw, bh);
+        // Containers have no setFlipX/Y, so mirror via signed scale.
+        container.setAngle(st.rotation || 0);
+        container.setScale(st.flipX ? -1 : 1, st.flipY ? -1 : 1);
 
         // Keep an up-to-date hit area; the actual click is dispatched centrally
         // from onPointerDown (so the first tap can be reserved for "start").

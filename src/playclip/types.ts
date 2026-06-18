@@ -26,6 +26,10 @@ export interface AssetStyle {
   borderWidth?: string;
   width?: string;
   height?: string;
+  // Transform fields (mirrored from editor's AssetStyle)
+  rotation?: number; // clockwise degrees
+  flipX?: boolean;
+  flipY?: boolean;
   // Animation fields (mirrored from editor's AssetStyle)
   animationStyle?: string;
   entryAnimation?: string;
