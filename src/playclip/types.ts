@@ -26,6 +26,19 @@ export interface AssetStyle {
   borderWidth?: string;
   width?: string;
   height?: string;
+  // Animation fields (mirrored from editor's AssetStyle)
+  animationStyle?: string;
+  entryAnimation?: string;
+  exitAnimation?: string;
+  animationDuration?: number;
+  animationEasing?: string;
+  animationOpacityFrom?: number;
+  animationOpacityTo?: number;
+  animationScaleFrom?: number;
+  animationScaleTo?: number;
+  animationSlideDistance?: number;
+  gestureSpeed?: number;
+  gestureDistance?: number;
 }
 
 export interface ButtonAction {
