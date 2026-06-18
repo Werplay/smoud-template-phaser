@@ -372,6 +372,9 @@ export class PlayclipScene extends Phaser.Scene {
     let baseY = 0;
     let baseScaleX = 1;
     let baseScaleY = 1;
+    // Current video rect — updated by layout() so startLoop() can compute
+    // gesture distances as a percentage of the video dimensions.
+    let layoutRect: Rect = { left: 0, top: 0, width: 0, height: 0 };
 
     // Resolve CSS easing name to a Phaser ease string.
     const toEase = (css?: string): string => {
@@ -415,8 +418,13 @@ export class PlayclipScene extends Phaser.Scene {
         tap: 1200, swipeLeft: 1400, swipeRight: 1400, swipeUp: 1400, swipeDown: 1400, circle: 2000,
       };
       const speed = style?.gestureSpeed ?? DEFAULT_SPEED[anim] ?? 1400;
-      // gestureDistance is px for swipe/circle and 0-100 (depth %) for tap.
-      const dist = style?.gestureDistance ?? 24;
+      // gestureDistance is treated as % of video rect dimension (width for
+      // horizontal, height for vertical, min-dimension for circle). Tap uses
+      // it as a 0-100 depth %, so it is excluded from the responsive conversion.
+      const distPct = style?.gestureDistance ?? 24;
+      const hDist = (distPct / 100) * layoutRect.width;
+      const vDist = (distPct / 100) * layoutRect.height;
+      const rDist = (distPct / 100) * Math.min(layoutRect.width, layoutRect.height);
 
       // CSS applies a single ease-in-out to the whole animation; all Phaser tween
       // segments use the same easing to replicate that behaviour.
@@ -466,36 +474,36 @@ export class PlayclipScene extends Phaser.Scene {
           break;
         }
         case 'swipeLeft':
-          // CSS keyframes: 0%=0, 60%=-dist, 100%=0; ease-in-out
+          // CSS keyframes: 0%=0, 60%=-hDist, 100%=0; ease-in-out
           this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX - dist, duration: speed * 0.6, ease: E },
-            { targets: image, x: baseX,        duration: speed * 0.4, ease: E },
+            { targets: image, x: baseX - hDist, duration: speed * 0.6, ease: E },
+            { targets: image, x: baseX,         duration: speed * 0.4, ease: E },
           ]});
           break;
         case 'swipeRight':
-          // CSS keyframes: 0%=0, 60%=+dist, 100%=0; ease-in-out
+          // CSS keyframes: 0%=0, 60%=+hDist, 100%=0; ease-in-out
           this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX + dist, duration: speed * 0.6, ease: E },
-            { targets: image, x: baseX,        duration: speed * 0.4, ease: E },
+            { targets: image, x: baseX + hDist, duration: speed * 0.6, ease: E },
+            { targets: image, x: baseX,         duration: speed * 0.4, ease: E },
           ]});
           break;
         case 'swipeUp':
-          // CSS keyframes: 0%=0, 60%=-dist, 100%=0; ease-in-out
+          // CSS keyframes: 0%=0, 60%=-vDist, 100%=0; ease-in-out
           this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, y: baseY - dist, duration: speed * 0.6, ease: E },
-            { targets: image, y: baseY,        duration: speed * 0.4, ease: E },
+            { targets: image, y: baseY - vDist, duration: speed * 0.6, ease: E },
+            { targets: image, y: baseY,         duration: speed * 0.4, ease: E },
           ]});
           break;
         case 'swipeDown':
-          // CSS keyframes: 0%=0, 60%=+dist, 100%=0; ease-in-out
+          // CSS keyframes: 0%=0, 60%=+vDist, 100%=0; ease-in-out
           this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, y: baseY + dist, duration: speed * 0.6, ease: E },
-            { targets: image, y: baseY,        duration: speed * 0.4, ease: E },
+            { targets: image, y: baseY + vDist, duration: speed * 0.6, ease: E },
+            { targets: image, y: baseY,         duration: speed * 0.4, ease: E },
           ]});
           break;
         case 'circle': {
           // CSS: linear ease (smooth circular path), keyframes at 0%/25%/50%/75%/100%
-          const r = dist || 14;
+          const r = rDist || 14;
           this.tweens.chain({ loop: -1, tweens: [
             { targets: image, x: baseX + r, y: baseY - r,        duration: speed * 0.25, ease: 'Linear' },
             { targets: image, x: baseX,     y: baseY - r * 1.57, duration: speed * 0.25, ease: 'Linear' },
@@ -641,6 +649,7 @@ export class PlayclipScene extends Phaser.Scene {
         baseY = c.y;
         baseScaleX = image.scaleX;
         baseScaleY = image.scaleY;
+        layoutRect = rect;
 
         // Reset any animated state so the image is clean after a resize.
         image.setAlpha(1).setAngle(0);
