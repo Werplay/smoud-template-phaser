@@ -128,6 +128,9 @@ export class PlayclipScene extends Phaser.Scene {
   // The playable holds on its first frame until the first tap anywhere.
   private started = false;
   private posterHeld = false;
+  // Completion is signalled to the network SDK exactly once (drives the SDK's
+  // end hook, e.g. Mintegral's window.gameEnd()).
+  private finished = false;
 
   // Timeline controls (seek-based playback behaviour).
   private loops: Control[] = [];
@@ -250,6 +253,14 @@ export class PlayclipScene extends Phaser.Scene {
       el.addEventListener('loadedmetadata', () => this.relayout(), { once: true });
     }
     video.once(Phaser.GameObjects.Events.VIDEO_CREATED, () => this.relayout());
+
+    // When the clip plays through to its end, the playable is complete — tell the
+    // network SDK so it fires its end hook (Mintegral's window.gameEnd(), etc.).
+    // Guarded by `started` so the muted poster-decode pass (paused on the first
+    // frame in update()) can't trigger a premature completion.
+    video.on(Phaser.GameObjects.Events.VIDEO_COMPLETE, () => {
+      if (this.started) this.finishAd();
+    });
 
     // A loaded-but-unplayed Phaser video renders nothing, so briefly play
     // (muted) to decode the first frame, then update() pauses on it as the
@@ -529,6 +540,14 @@ export class PlayclipScene extends Phaser.Scene {
     }
   }
 
+  // Signal end-of-playable to the network SDK exactly once. The SDK maps this to
+  // the active network's completion hook (e.g. Mintegral calls window.gameEnd()).
+  private finishAd(): void {
+    if (this.finished) return;
+    this.finished = true;
+    sdk.finish();
+  }
+
   private activateButton(overlay: Overlay): void {
     // Debounce a single appearance of the button; this is re-armed in update()
     // once the button leaves its time window (so it can be pressed again if its
@@ -566,6 +585,10 @@ export class PlayclipScene extends Phaser.Scene {
       // Hand off to the network SDK's store routing. Per-playable store links are
       // baked into build.json at build time.
       sdk.install();
+      // A CTA press also completes the playable — signal end so networks that
+      // wait for it (e.g. Mintegral's window.gameEnd()) are notified even when the
+      // user converts before the clip plays out.
+      this.finishAd();
       return;
     }
 
