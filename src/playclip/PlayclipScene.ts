@@ -145,6 +145,10 @@ export class PlayclipScene extends Phaser.Scene {
   private currentLoop: Control | null = null;
   private currentJump: Control | null = null;
   private currentFreeze: Control | null = null;
+  // Previous video time seen by applyFreezes; -1 so a freeze at t=0 can still fire
+  // once playback starts. Used to detect the playhead crossing a freeze point even
+  // when a frame jumps past it.
+  private lastFreezeTime = -1;
   // Freeze ids already stopped on; kept until the playhead leaves their window so
   // breaking out of a freeze doesn't immediately re-trap it.
   private triggeredFreezes = new Set<string>();
@@ -876,6 +880,8 @@ export class PlayclipScene extends Phaser.Scene {
       }
       this.currentJump = null;
       v.setCurrentTime(action.seekTime);
+      // Re-baseline so the seek isn't read as a frame-by-frame freeze crossing.
+      this.lastFreezeTime = action.seekTime;
       v.setPaused(false);
       return;
     }
@@ -901,6 +907,8 @@ export class PlayclipScene extends Phaser.Scene {
         const resumeAt = this.currentLoop.endTime + 0.001;
         this.currentLoop = null;
         v.setCurrentTime(resumeAt);
+        // Re-baseline so the loop-breakout seek isn't read as a freeze crossing.
+        this.lastFreezeTime = resumeAt;
       }
       this.currentJump = null;
       v.setPaused(false);
@@ -1000,14 +1008,20 @@ export class PlayclipScene extends Phaser.Scene {
   // and re-arms once the playhead leaves the window.
   private applyFreezes(v: Phaser.GameObjects.Video): void {
     if (this.freezes.length === 0) return;
+    const t = v.getCurrentTime();
+    const prev = this.lastFreezeTime;
+    this.lastFreezeTime = t;
+
     // Loops and jumps take priority over freezes.
     if (this.currentLoop || this.currentJump) return;
-    const t = v.getCurrentTime();
 
     if (this.currentFreeze) {
-      // Release the freeze only if the playhead has moved outside its window
-      // (e.g. a seek action). Otherwise keep the frame held.
-      if (t < this.currentFreeze.startTime || t > this.currentFreeze.endTime + 0.1) {
+      // A freeze holds at its startTime; release only once the playhead has moved
+      // outside that hold window (e.g. a seek action). Otherwise keep it held.
+      if (
+        t < this.currentFreeze.startTime - 0.001 ||
+        t > this.currentFreeze.startTime + 0.1
+      ) {
         this.currentFreeze = null;
       } else if (!v.isPaused()) {
         v.setPaused(true);
@@ -1015,20 +1029,32 @@ export class PlayclipScene extends Phaser.Scene {
       return;
     }
 
-    // Re-arm freezes once the playhead has left their window.
+    // Re-arm freezes once the playhead has left their hold window.
     this.freezes.forEach((f) => {
-      if (this.triggeredFreezes.has(f.id) && (t < f.startTime || t > f.endTime + 0.1)) {
+      if (
+        this.triggeredFreezes.has(f.id) &&
+        (t < f.startTime - 0.001 || t > f.startTime + 0.1)
+      ) {
         this.triggeredFreezes.delete(f.id);
       }
     });
 
-    // Stop at the start of the first not-yet-triggered freeze and hold there.
+    // Stop at the first not-yet-triggered freeze the playhead has reached or
+    // crossed since the last frame (so a frame that jumps past it still stops
+    // instead of skipping), seeking back to the exact freeze frame to hold it.
     const found = this.freezes.find(
-      (f) => t >= f.startTime && t <= f.endTime && !this.triggeredFreezes.has(f.id),
+      (f) =>
+        !this.triggeredFreezes.has(f.id) &&
+        t >= f.startTime - 0.001 &&
+        prev < f.startTime - 0.001,
     );
     if (found) {
       this.currentFreeze = found;
       this.triggeredFreezes.add(found.id);
+      if (Math.abs(t - found.startTime) > 0.001) {
+        v.setCurrentTime(found.startTime);
+        this.lastFreezeTime = found.startTime;
+      }
       v.setPaused(true);
     }
   }
