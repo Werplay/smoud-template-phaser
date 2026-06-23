@@ -126,6 +126,12 @@ export class PlayclipScene extends Phaser.Scene {
   private video?: Phaser.GameObjects.Video;
   private videoRect: Rect = { left: 0, top: 0, width: 0, height: 0 };
   private videoReady = false;
+  // Geometry mask clipping every overlay to the video rect, so an asset placed
+  // partly outside the video view is cropped at the edge rather than spilling
+  // into the letterbox. Mirrors the DOM export's `.video-wrapper { overflow:
+  // hidden }`.
+  private cropShape?: Phaser.GameObjects.Graphics;
+  private cropMask?: Phaser.Display.Masks.GeometryMask;
   // Video sources are loaded up front (one per orientation that was provided).
   private videoKeys: { default?: string; portrait?: string; landscape?: string } = {};
   private lastVideoKey: string | null = null;
@@ -1064,7 +1070,37 @@ export class PlayclipScene extends Phaser.Scene {
     this.maybeSwapVideoSource();
     this.layoutVideo();
     this.overlays.forEach((overlay) => overlay.layout(this.videoRect, this.orientation));
+    this.updateCropMask();
   };
+
+  // Clip overlays to the current video rect. An overlay can be positioned (or
+  // sized/rotated) so it extends past the video edge; this crops the overflow
+  // at the boundary instead of letting it render over the letterbox — matching
+  // the DOM canvas/preview/export, where the video wrapper has overflow:hidden.
+  private updateCropMask(): void {
+    const r = this.videoRect;
+    if (!r.width || !r.height) return;
+
+    if (!this.cropShape) {
+      // make.graphics() keeps the shape off the display list — it's only used as
+      // the mask geometry, never rendered itself.
+      this.cropShape = this.make.graphics({});
+      this.cropMask = this.cropShape.createGeometryMask();
+    }
+
+    this.cropShape.clear();
+    this.cropShape.fillStyle(0xffffff);
+    this.cropShape.fillRect(r.left, r.top, r.width, r.height);
+
+    const mask = this.cropMask;
+    if (!mask) return;
+    this.overlays.forEach((overlay) => {
+      const root = overlay.root as unknown as {
+        setMask?: (m: Phaser.Display.Masks.GeometryMask) => void;
+      };
+      if (typeof root.setMask === 'function') root.setMask(mask);
+    });
+  }
 
   // --- Public controls (driven by Game / SDK events) ----------------------
 
