@@ -1,6 +1,7 @@
 import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { PLAYCLIP_DATA } from '../playclip-data';
+import { isEndcardVisible } from './endcard-visibility';
 import type {
   AssetEntry,
   AssetStyle,
@@ -103,8 +104,8 @@ interface Control {
   endTime: number;
 }
 
-// Core subset of asset types this scene renders. Audio, transparent-button
-// and endcard are intentionally deferred.
+// Core overlay asset types rendered on the video timeline. Audio is deferred;
+// endcard is handled separately (full-screen post-roll).
 const SUPPORTED_TYPES: PlayclipAsset['type'][] = [
   'text',
   'image',
@@ -122,6 +123,9 @@ export class PlayclipScene extends Phaser.Scene {
   private playclipData: PlayclipData = PLAYCLIP_DATA;
   private assets: PlayclipAsset[] = [];
   private overlays: Overlay[] = [];
+  private endcardAsset?: PlayclipAsset;
+  private endcardOverlay?: Overlay;
+  private videoEnded = false;
 
   private video?: Phaser.GameObjects.Video;
   private videoRect: Rect = { left: 0, top: 0, width: 0, height: 0 };
@@ -189,6 +193,9 @@ export class PlayclipScene extends Phaser.Scene {
       if (asset.type === 'image' && asset.imageUrl) {
         this.load.image(`img-${asset.id}`, asset.imageUrl);
       }
+      if (asset.type === 'endcard' && asset.imageUrl) {
+        this.load.image(`endcard-${asset.id}`, asset.imageUrl);
+      }
     });
 
     // Load the video source(s) via the loader so the Video object is ready
@@ -210,7 +217,13 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.assets = this.rawAssets().filter((a) => SUPPORTED_TYPES.includes(a.type));
+    const allAssets = this.rawAssets();
+    const endcards = allAssets.filter((a) => a.type === 'endcard');
+    if (endcards.length > 1) {
+      console.warn('[PlayclipScene] Multiple endcard assets; using the first.');
+    }
+    this.endcardAsset = endcards[0];
+    this.assets = allAssets.filter((a) => SUPPORTED_TYPES.includes(a.type));
     this.loops = this.rawControls('loops');
     this.jumps = this.rawControls('jumps');
     this.freezes = this.rawControls('freezes');
@@ -218,6 +231,10 @@ export class PlayclipScene extends Phaser.Scene {
 
     this.createVideo();
     this.createOverlays();
+    if (this.endcardAsset) {
+      this.endcardOverlay = this.buildEndcard(this.endcardAsset);
+      this.endcardOverlay.root.setVisible(false);
+    }
     this.relayout();
 
     this.scale.on('resize', this.relayout, this);
@@ -275,7 +292,22 @@ export class PlayclipScene extends Phaser.Scene {
     // Guarded by `started` so the muted poster-decode pass (paused on the first
     // frame in update()) can't trigger a premature completion.
     video.on(Phaser.GameObjects.Events.VIDEO_COMPLETE, () => {
-      if (this.started) this.finishAd();
+      if (!this.started) return;
+      this.videoEnded = true;
+      video.setPaused(true);
+      const duration = video.getDuration();
+      if (Number.isFinite(duration) && duration > 0) {
+        video.setCurrentTime(duration);
+      }
+      if (this.endcardAsset && this.endcardOverlay) {
+        const t = video.getCurrentTime();
+        if (isEndcardVisible(this.endcardAsset, t, true)) {
+          this.endcardOverlay.wasVisible = true;
+          this.endcardOverlay.root.setVisible(true);
+        }
+        return;
+      }
+      this.finishAd();
     });
 
     // A loaded-but-unplayed Phaser video renders nothing, so briefly play
@@ -785,6 +817,47 @@ export class PlayclipScene extends Phaser.Scene {
     };
   }
 
+  // Full-screen post-roll overlay shown when the clip ends (or within its time
+  // window). Background color lives in `content`; optional image in `imageUrl`.
+  private buildEndcard(asset: PlayclipAsset): Overlay {
+    const container = this.add.container(0, 0).setDepth(15);
+    const imageKey = asset.imageUrl ? `endcard-${asset.id}` : undefined;
+    const bgGraphics = this.add.graphics();
+    const bgImage =
+      imageKey && this.textures.exists(imageKey)
+        ? this.add.image(0, 0, imageKey).setOrigin(0, 0)
+        : undefined;
+
+    if (bgImage) {
+      container.add(bgImage);
+    } else {
+      container.add(bgGraphics);
+    }
+
+    return {
+      asset,
+      root: container,
+      clicked: false,
+      wasVisible: false,
+      layout: (rect, _orientation) => {
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        container.setPosition(cx, cy);
+        container.setSize(rect.width, rect.height);
+
+        if (bgImage) {
+          bgImage.setPosition(-rect.width / 2, -rect.height / 2);
+          bgImage.setDisplaySize(rect.width, rect.height);
+        } else {
+          const color = cssColorToInt(asset.content || '#667eea') ?? 0x667eea;
+          bgGraphics.clear();
+          bgGraphics.fillStyle(color, 1);
+          bgGraphics.fillRect(-rect.width / 2, -rect.height / 2, rect.width, rect.height);
+        }
+      },
+    };
+  }
+
   // --- Interaction --------------------------------------------------------
 
   // An overlay accepts taps if it's a button, a transparent-button, or an image
@@ -795,6 +868,45 @@ export class PlayclipScene extends Phaser.Scene {
       overlay.asset.type === 'transparent-button' ||
       (overlay.asset.type === 'image' && !!overlay.asset.buttonAction)
     );
+  }
+
+  private hasVisiblePlayableOverlay(time: number): boolean {
+    for (const overlay of this.overlays) {
+      if (!this.isInteractive(overlay) || overlay.clicked) continue;
+      const start = overlay.asset.time;
+      const end = overlay.asset.endTime || overlay.asset.time + 5;
+      if (time < start || time > end) continue;
+      const node = overlay.root as unknown as { visible: boolean };
+      if (!node.visible) continue;
+      return true;
+    }
+    return false;
+  }
+
+  private isEndcardClickable(time: number): boolean {
+    if (!this.endcardAsset || !this.endcardOverlay) return false;
+    const root = this.endcardOverlay.root as unknown as { visible: boolean };
+    if (!root.visible) return false;
+    if (!this.videoReady || !this.video) return false;
+    if (!this.video.isPaused() && !this.videoEnded) return false;
+    if (!isEndcardVisible(this.endcardAsset, time, this.videoEnded)) return false;
+    if (!this.videoEnded && this.hasVisiblePlayableOverlay(time)) return false;
+    return true;
+  }
+
+  private pointerHitsVideoRect(px: number, py: number): boolean {
+    const r = this.videoRect;
+    return (
+      px >= r.left &&
+      px <= r.left + r.width &&
+      py >= r.top &&
+      py <= r.top + r.height
+    );
+  }
+
+  private activateEndcard(): void {
+    sdk.install();
+    this.finishAd();
   }
 
   // Single entry point for all taps. The very first tap anywhere only starts
@@ -812,6 +924,7 @@ export class PlayclipScene extends Phaser.Scene {
     // are centre-origin, so centre ± displayWidth/2 covers each case uniformly.
     const px = pointer.worldX;
     const py = pointer.worldY;
+    let handled = false;
     for (const overlay of this.overlays) {
       if (!this.isInteractive(overlay) || overlay.clicked) continue;
       const node = overlay.root as unknown as {
@@ -831,7 +944,15 @@ export class PlayclipScene extends Phaser.Scene {
         py <= node.y + halfH
       ) {
         this.activateButton(overlay);
+        handled = true;
         break;
+      }
+    }
+
+    if (!handled) {
+      const t = this.video?.getCurrentTime() ?? 0;
+      if (this.isEndcardClickable(t) && this.pointerHitsVideoRect(px, py)) {
+        this.activateEndcard();
       }
     }
   }
@@ -970,6 +1091,26 @@ export class PlayclipScene extends Phaser.Scene {
       // pressed again if its time range comes back around (e.g. a looping intro).
       if (this.isInteractive(overlay) && !within) overlay.clicked = false;
     }
+
+    this.updateEndcardVisibility(t);
+  }
+
+  private updateEndcardVisibility(time: number): void {
+    if (!this.endcardAsset || !this.endcardOverlay) return;
+
+    const shouldShow = isEndcardVisible(this.endcardAsset, time, this.videoEnded);
+    const overlay = this.endcardOverlay;
+
+    if (shouldShow && !overlay.wasVisible) {
+      overlay.wasVisible = true;
+      overlay.root.setVisible(true);
+    } else if (!shouldShow && overlay.wasVisible) {
+      overlay.wasVisible = false;
+      overlay.root.setVisible(false);
+      if (this.videoEnded && !this.finished) {
+        this.finishAd();
+      }
+    }
   }
 
   // Loops repeat a segment; jumps skip a segment. Loop takes precedence.
@@ -1070,6 +1211,7 @@ export class PlayclipScene extends Phaser.Scene {
     this.maybeSwapVideoSource();
     this.layoutVideo();
     this.overlays.forEach((overlay) => overlay.layout(this.videoRect, this.orientation));
+    this.endcardOverlay?.layout(this.videoRect, this.orientation);
     this.updateCropMask();
   };
 
@@ -1094,7 +1236,10 @@ export class PlayclipScene extends Phaser.Scene {
 
     const mask = this.cropMask;
     if (!mask) return;
-    this.overlays.forEach((overlay) => {
+    const masked = this.endcardOverlay
+      ? [...this.overlays, this.endcardOverlay]
+      : this.overlays;
+    masked.forEach((overlay) => {
       const root = overlay.root as unknown as {
         setMask?: (m: Phaser.Display.Masks.GeometryMask) => void;
       };
