@@ -88,6 +88,11 @@ function cssColorToInt(color: string | undefined): number | undefined {
   }
 }
 
+function textBackgroundColor(color: string | undefined): string | undefined {
+  if (!color || color === 'transparent') return undefined;
+  return color;
+}
+
 function fontStyleString(style: AssetStyle): string {
   const parts: string[] = [];
   if (style.fontWeight === 'bold' || style.fontWeight === '700') parts.push('bold');
@@ -473,7 +478,7 @@ export class PlayclipScene extends Phaser.Scene {
       color: st.color || '#ffffff',
       fontStyle: fontStyleString(st),
       align: st.textAlign || 'center',
-      backgroundColor: st.backgroundColor || undefined,
+      backgroundColor: textBackgroundColor(st.backgroundColor),
     });
     text.setPadding(scaledPadX, scaledPadY, scaledPadX, scaledPadY);
     text.setWordWrapWidth(Math.max(1, box.width - scaledPadX * 2), true);
@@ -495,7 +500,7 @@ export class PlayclipScene extends Phaser.Scene {
         color: style.color || '#ffffff',
         fontStyle: fontStyleString(style),
         align: style.textAlign || 'center',
-        backgroundColor: style.backgroundColor || undefined,
+        backgroundColor: textBackgroundColor(style.backgroundColor),
       })
       .setOrigin(0.5)
       .setDepth(DEPTH_TEXT);
