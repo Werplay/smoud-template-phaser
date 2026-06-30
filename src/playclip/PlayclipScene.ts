@@ -113,6 +113,15 @@ const SUPPORTED_TYPES: PlayclipAsset['type'][] = [
   'transparent-button',
 ];
 
+// Draw order mirrors the editor: end card is the full-screen background; every
+// timeline overlay (text, image, buttons) renders above it.
+const DEPTH_VIDEO = 0;
+const DEPTH_ENDCARD = 10;
+const DEPTH_TEXT = 20;
+const DEPTH_IMAGE = 25;
+const DEPTH_BUTTON = 30;
+const DEPTH_TRANSPARENT_BUTTON = 35;
+
 // ---------------------------------------------------------------------------
 // Scene
 // ---------------------------------------------------------------------------
@@ -264,11 +273,11 @@ export class PlayclipScene extends Phaser.Scene {
     const key = this.currentVideoKey();
     if (!key || !this.cache.video.exists(key)) {
       // No (loaded) video — create an empty object so layout calls are safe.
-      this.video = this.add.video(0, 0).setOrigin(0.5).setDepth(0);
+      this.video = this.add.video(0, 0).setOrigin(0.5).setDepth(DEPTH_VIDEO);
       return;
     }
 
-    const video = this.add.video(0, 0, key).setOrigin(0.5).setDepth(0);
+    const video = this.add.video(0, 0, key).setOrigin(0.5).setDepth(DEPTH_VIDEO);
     this.video = video;
     this.lastVideoKey = key;
     this.videoReady = true; // loader already prepared the texture + dimensions
@@ -393,7 +402,7 @@ export class PlayclipScene extends Phaser.Scene {
         backgroundColor: style.backgroundColor || undefined,
       })
       .setOrigin(0.5)
-      .setDepth(10);
+      .setDepth(DEPTH_TEXT);
 
     const pad = firstNumber(style.padding, 0);
     if (pad) text.setPadding(pad);
@@ -421,7 +430,7 @@ export class PlayclipScene extends Phaser.Scene {
     const image = this.textures.exists(key)
       ? this.add.image(0, 0, key)
       : this.add.image(0, 0, '__MISSING');
-    image.setOrigin(0.5).setDepth(10);
+    image.setOrigin(0.5).setDepth(DEPTH_IMAGE);
 
     // Base position/scale updated by layout() on every resize.
     let baseX = 0;
@@ -747,7 +756,7 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   private buildButton(asset: PlayclipAsset): Overlay {
-    const container = this.add.container(0, 0).setDepth(20);
+    const container = this.add.container(0, 0).setDepth(DEPTH_BUTTON);
     const graphics = this.add.graphics();
     const label = this.add.text(0, 0, asset.content || '', { fontSize: '20px' }).setOrigin(0.5);
     container.add([graphics, label]);
@@ -811,7 +820,7 @@ export class PlayclipScene extends Phaser.Scene {
   // renders nothing but occupies a hit region sized from its width/height
   // percentages; the tap is dispatched from onPointerDown like a normal button.
   private buildTransparentButton(asset: PlayclipAsset): Overlay {
-    const container = this.add.container(0, 0).setDepth(25);
+    const container = this.add.container(0, 0).setDepth(DEPTH_TRANSPARENT_BUTTON);
 
     return {
       asset,
@@ -835,7 +844,7 @@ export class PlayclipScene extends Phaser.Scene {
   // window). Background color lives in `content`; optional image in `imageUrl`.
   // Color is always drawn first so transparent PNG regions match the editor.
   private buildEndcard(asset: PlayclipAsset): Overlay {
-    const container = this.add.container(0, 0).setDepth(15);
+    const container = this.add.container(0, 0).setDepth(DEPTH_ENDCARD);
     const imageKey = asset.imageUrl ? `endcard-${asset.id}` : undefined;
     const bgGraphics = this.add.graphics();
     container.add(bgGraphics);
