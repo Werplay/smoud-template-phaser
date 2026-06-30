@@ -2,6 +2,12 @@ import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { PLAYCLIP_DATA } from '../playclip-data';
 import { isEndcardVisible } from './endcard-visibility';
+import {
+  computePlaybackTime,
+  getPostRollConfig,
+  isPostRollComplete,
+  type PostRollConfig,
+} from './playback-time';
 import type {
   AssetEntry,
   AssetStyle,
@@ -154,6 +160,7 @@ export class PlayclipScene extends Phaser.Scene {
   private endcardAsset?: PlayclipAsset;
   private endcardOverlay?: Overlay;
   private videoEnded = false;
+  private postRollClockStart = 0;
 
   private video?: Phaser.GameObjects.Video;
   private videoRect: Rect = { left: 0, top: 0, width: 0, height: 0 };
@@ -328,10 +335,14 @@ export class PlayclipScene extends Phaser.Scene {
         video.setCurrentTime(duration);
       }
       if (this.endcardAsset && this.endcardOverlay) {
-        const t = video.getCurrentTime();
+        this.postRollClockStart = this.time.now;
+        const t = this.getPlaybackTime();
         if (isEndcardVisible(this.endcardAsset, t, true)) {
           this.endcardOverlay.wasVisible = true;
           this.endcardOverlay.root.setVisible(true);
+        }
+        if (!this.getPostRollConfig()) {
+          this.finishAd();
         }
         return;
       }
@@ -1062,7 +1073,7 @@ export class PlayclipScene extends Phaser.Scene {
     }
 
     if (!handled) {
-      const t = this.video?.getCurrentTime() ?? 0;
+      const t = this.getPlaybackTime();
       if (this.isEndcardClickable(t) && this.pointerHitsVideoRect(px, py)) {
         this.activateEndcard();
       }
@@ -1156,6 +1167,25 @@ export class PlayclipScene extends Phaser.Scene {
 
   // --- Per-frame & resize -------------------------------------------------
 
+  private getPostRollConfig(): PostRollConfig | null {
+    if (!this.endcardAsset || !this.video) return null;
+    const duration = this.video.getDuration();
+    const videoDuration =
+      Number.isFinite(duration) && duration > 0
+        ? duration
+        : this.endcardAsset.time;
+    return getPostRollConfig(this.endcardAsset, videoDuration);
+  }
+
+  /** Timeline clock for overlay visibility (includes synthetic post-roll time). */
+  private getPlaybackTime(): number {
+    const videoTime = this.video?.getCurrentTime() ?? 0;
+    if (!this.videoEnded) return videoTime;
+    const postRoll = this.getPostRollConfig();
+    const elapsed = (this.time.now - this.postRollClockStart) / 1000;
+    return computePlaybackTime(videoTime, this.videoEnded, postRoll, elapsed);
+  }
+
   update(): void {
     const v = this.video;
     const ready = !!v && this.videoReady;
@@ -1166,7 +1196,7 @@ export class PlayclipScene extends Phaser.Scene {
         v!.setPaused(true);
         this.posterHeld = true;
       }
-    } else if (ready) {
+    } else if (ready && !this.videoEnded) {
       // A freeze holds the playhead until a button breaks out of it; while held,
       // don't let loops/jumps move it. Otherwise loops/jumps may seek the
       // playhead before we evaluate visibility.
@@ -1174,7 +1204,17 @@ export class PlayclipScene extends Phaser.Scene {
       this.applyFreezes(v!);
     }
 
-    const t = ready ? v!.getCurrentTime() : 0;
+    const postRoll = this.videoEnded ? this.getPostRollConfig() : null;
+    const t = this.getPlaybackTime();
+
+    if (
+      this.videoEnded &&
+      postRoll &&
+      isPostRollComplete(t, postRoll) &&
+      !this.finished
+    ) {
+      this.finishAd();
+    }
 
     for (const overlay of this.overlays) {
       const start = overlay.asset.time;
