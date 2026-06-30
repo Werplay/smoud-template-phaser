@@ -31,6 +31,20 @@ function firstNumber(input: string | number | undefined, fallback: number): numb
   return match ? parseFloat(match[0]) : fallback;
 }
 
+// Parse CSS padding shorthand (e.g. "8px 12px" -> { x: 8, y: 12 }).
+function paddingXY(
+  padding: string | undefined,
+  fallbackX: number,
+  fallbackY: number,
+): { x: number; y: number } {
+  if (!padding) return { x: fallbackX, y: fallbackY };
+  const nums = String(padding).match(/-?\d+(\.\d+)?/g);
+  if (!nums || nums.length === 0) return { x: fallbackX, y: fallbackY };
+  const x = parseFloat(nums[0]);
+  const y = nums.length > 1 ? parseFloat(nums[1]) : x;
+  return { x, y };
+}
+
 // Fit (natW x natH) inside (W x H) preserving aspect ratio, centered —
 // mirrors the playclip's object-fit: contain + letterbox math.
 function containRect(natW: number, natH: number, W: number, H: number): Rect {
@@ -390,12 +404,77 @@ export class PlayclipScene extends Phaser.Scene {
       : asset.landscapeHeightPercentage;
   }
 
+  // Editor font sizes are px in video-bounds space; recover that width from
+  // stored width % + style width when possible, else use a typical preview size.
+  private designVideoBoundsWidth(
+    asset: PlayclipAsset,
+    orientation: Orientation,
+    style: AssetStyle,
+    rect: Rect,
+  ): number {
+    const wPct = this.widthPct(asset, orientation);
+    const styleW = firstNumber(style.width, 0);
+    if (wPct && wPct > 0 && styleW > 0) return styleW / wPct;
+
+    const element = this.video?.video as HTMLVideoElement | undefined;
+    const natW = element?.videoWidth || this.video?.width || 0;
+    const natH = element?.videoHeight || this.video?.height || 0;
+    const refGameW = orientation === 'portrait' ? 360 : 640;
+    const refGameH = orientation === 'portrait' ? 640 : 360;
+    if (natW && natH) return containRect(natW, natH, refGameW, refGameH).width;
+    return rect.width || refGameW;
+  }
+
+  private layoutTextOverlay(
+    text: Phaser.GameObjects.Text,
+    asset: PlayclipAsset,
+    rect: Rect,
+    orientation: Orientation,
+  ): void {
+    const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
+    const refW = this.designVideoBoundsWidth(asset, orientation, st, rect);
+    const scale = refW > 0 ? rect.width / refW : 1;
+    const baseFont = st.fontSize ?? 16;
+    const fontSize = Math.max(1, baseFont * scale);
+
+    const { x: padX, y: padY } = paddingXY(st.padding, 8, 12);
+    const scaledPadX = padX * scale;
+    const scaledPadY = padY * scale;
+
+    text.setText(asset.content || '');
+    text.setStyle({
+      fontFamily: st.fontFamily || 'Arial, sans-serif',
+      fontSize: `${fontSize}px`,
+      color: st.color || '#ffffff',
+      fontStyle: fontStyleString(st),
+      align: st.textAlign || 'center',
+      backgroundColor: st.backgroundColor || undefined,
+    });
+    text.setPadding(scaledPadX, scaledPadY, scaledPadX, scaledPadY);
+
+    const wPct = this.widthPct(asset, orientation);
+    const styleW = firstNumber(st.width, 0);
+    let wrapWidth: number | undefined;
+    if (wPct) {
+      wrapWidth = Math.max(1, wPct * rect.width - scaledPadX * 2);
+    } else if (styleW > 0) {
+      wrapWidth = Math.max(1, styleW * scale - scaledPadX * 2);
+    }
+    if (wrapWidth) text.setWordWrapWidth(wrapWidth, true);
+
+    const c = this.centerOf(asset, rect, orientation);
+    text.setPosition(c.x, c.y);
+    text.setAngle(st.rotation || 0);
+    text.setFlipX(!!st.flipX);
+    text.setFlipY(!!st.flipY);
+  }
+
   private buildText(asset: PlayclipAsset): Overlay {
     const style = (pickOriented(asset.style, this.orientation) || {}) as AssetStyle;
     const text = this.add
       .text(0, 0, asset.content || '', {
         fontFamily: style.fontFamily || 'Arial, sans-serif',
-        fontSize: `${style.fontSize || 24}px`,
+        fontSize: `${style.fontSize ?? 16}px`,
         color: style.color || '#ffffff',
         fontStyle: fontStyleString(style),
         align: style.textAlign || 'center',
@@ -404,24 +483,12 @@ export class PlayclipScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(DEPTH_TEXT);
 
-    const pad = firstNumber(style.padding, 0);
-    if (pad) text.setPadding(pad);
-
     return {
       asset,
       root: text,
       clicked: false,
       wasVisible: false,
-      layout: (rect, orientation) => {
-        const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
-        text.setFontSize(st.fontSize || 24);
-        text.setColor(st.color || '#ffffff');
-        const c = this.centerOf(asset, rect, orientation);
-        text.setPosition(c.x, c.y);
-        text.setAngle(st.rotation || 0);
-        text.setFlipX(!!st.flipX);
-        text.setFlipY(!!st.flipY);
-      },
+      layout: (rect, orientation) => this.layoutTextOverlay(text, asset, rect, orientation),
     };
   }
 
