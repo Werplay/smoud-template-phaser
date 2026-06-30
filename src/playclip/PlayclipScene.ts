@@ -406,23 +406,47 @@ export class PlayclipScene extends Phaser.Scene {
 
   // Editor font sizes are px in video-bounds space; recover that width from
   // stored width % + style width when possible, else use a typical preview size.
-  private designVideoBoundsWidth(
+  private designVideoBounds(
     asset: PlayclipAsset,
     orientation: Orientation,
     style: AssetStyle,
     rect: Rect,
-  ): number {
+  ): { width: number; height: number } {
     const wPct = this.widthPct(asset, orientation);
+    const hPct = this.heightPct(asset, orientation);
     const styleW = firstNumber(style.width, 0);
-    if (wPct && wPct > 0 && styleW > 0) return styleW / wPct;
+    const styleH = firstNumber(style.height, 0);
+    if (wPct && wPct > 0 && styleW > 0 && hPct && hPct > 0 && styleH > 0) {
+      return { width: styleW / wPct, height: styleH / hPct };
+    }
 
     const element = this.video?.video as HTMLVideoElement | undefined;
     const natW = element?.videoWidth || this.video?.width || 0;
     const natH = element?.videoHeight || this.video?.height || 0;
     const refGameW = orientation === 'portrait' ? 360 : 640;
     const refGameH = orientation === 'portrait' ? 640 : 360;
-    if (natW && natH) return containRect(natW, natH, refGameW, refGameH).width;
-    return rect.width || refGameW;
+    if (natW && natH) {
+      const ref = containRect(natW, natH, refGameW, refGameH);
+      return { width: ref.width, height: ref.height };
+    }
+    return { width: rect.width || refGameW, height: rect.height || refGameH };
+  }
+
+  // Editor anchors the centre of a fixed box (style width/height or stored %).
+  private textBoxDimensions(
+    asset: PlayclipAsset,
+    rect: Rect,
+    orientation: Orientation,
+    style: AssetStyle,
+    scale: number,
+  ): { width: number; height: number } {
+    const wPct = this.widthPct(asset, orientation);
+    const hPct = this.heightPct(asset, orientation);
+    const styleW = firstNumber(style.width, 60);
+    const styleH = firstNumber(style.height, 40);
+    const width = wPct ? wPct * rect.width : styleW * scale;
+    const height = hPct ? hPct * rect.height : styleH * scale;
+    return { width: Math.max(1, width), height: Math.max(1, height) };
   }
 
   private layoutTextOverlay(
@@ -432,14 +456,15 @@ export class PlayclipScene extends Phaser.Scene {
     orientation: Orientation,
   ): void {
     const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
-    const refW = this.designVideoBoundsWidth(asset, orientation, st, rect);
-    const scale = refW > 0 ? rect.width / refW : 1;
+    const design = this.designVideoBounds(asset, orientation, st, rect);
+    const scale = design.width > 0 ? rect.width / design.width : 1;
     const baseFont = st.fontSize ?? 16;
     const fontSize = Math.max(1, baseFont * scale);
 
     const { x: padX, y: padY } = paddingXY(st.padding, 8, 12);
     const scaledPadX = padX * scale;
     const scaledPadY = padY * scale;
+    const box = this.textBoxDimensions(asset, rect, orientation, st, scale);
 
     text.setText(asset.content || '');
     text.setStyle({
@@ -451,16 +476,8 @@ export class PlayclipScene extends Phaser.Scene {
       backgroundColor: st.backgroundColor || undefined,
     });
     text.setPadding(scaledPadX, scaledPadY, scaledPadX, scaledPadY);
-
-    const wPct = this.widthPct(asset, orientation);
-    const styleW = firstNumber(st.width, 0);
-    let wrapWidth: number | undefined;
-    if (wPct) {
-      wrapWidth = Math.max(1, wPct * rect.width - scaledPadX * 2);
-    } else if (styleW > 0) {
-      wrapWidth = Math.max(1, styleW * scale - scaledPadX * 2);
-    }
-    if (wrapWidth) text.setWordWrapWidth(wrapWidth, true);
+    text.setWordWrapWidth(Math.max(1, box.width - scaledPadX * 2), true);
+    text.setFixedSize(box.width, box.height);
 
     const c = this.centerOf(asset, rect, orientation);
     text.setPosition(c.x, c.y);
