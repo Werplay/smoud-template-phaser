@@ -510,11 +510,13 @@ export class PlayclipScene extends Phaser.Scene {
           break;
         case 'shake':
           // CSS keyframes at 0%, 25%, 75%, 100% with hardcoded ±2px, 0.5s ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX - 2, duration: speed * 0.25, ease: E },
-            { targets: image, x: baseX + 2, duration: speed * 0.5,  ease: E },
-            { targets: image, x: baseX,     duration: speed * 0.25, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, x: baseX - 2, duration: speed * 0.25, ease: E },
+              { targets: image, x: baseX + 2, duration: speed * 0.5, ease: E },
+              { targets: image, x: baseX, duration: speed * 0.25, ease: E },
+            ]
+          });
           break;
         case 'float':
           // CSS: translateY(0) rotate(0) → translateY(-3px) rotate(1deg) → back, 3s ease-in-out
@@ -525,50 +527,62 @@ export class PlayclipScene extends Phaser.Scene {
           // HTML builder converts: --gesture-tap-depth = Math.min(1, gestureDistance / 100)
           const tapDist = style?.gestureDistance ?? 18;
           const depth = Math.min(1, tapDist / 100);
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, scaleX: baseScaleX * (1 - depth), scaleY: baseScaleY * (1 - depth), duration: speed * 0.4,  ease: E },
-            { targets: image, scaleX: baseScaleX * 1.04,        scaleY: baseScaleY * 1.04,        duration: speed * 0.25, ease: E },
-            { targets: image, scaleX: baseScaleX,               scaleY: baseScaleY,               duration: speed * 0.35, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, scaleX: baseScaleX * (1 - depth), scaleY: baseScaleY * (1 - depth), duration: speed * 0.4, ease: E },
+              { targets: image, scaleX: baseScaleX * 1.04, scaleY: baseScaleY * 1.04, duration: speed * 0.25, ease: E },
+              { targets: image, scaleX: baseScaleX, scaleY: baseScaleY, duration: speed * 0.35, ease: E },
+            ]
+          });
           break;
         }
         case 'swipeLeft':
           // CSS keyframes: 0%=0, 60%=-hDist, 100%=0; ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX - hDist, duration: speed * 0.6, ease: E },
-            { targets: image, x: baseX,         duration: speed * 0.4, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, x: baseX - hDist, duration: speed * 0.6, ease: E },
+              { targets: image, x: baseX, duration: speed * 0.4, ease: E },
+            ]
+          });
           break;
         case 'swipeRight':
           // CSS keyframes: 0%=0, 60%=+hDist, 100%=0; ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX + hDist, duration: speed * 0.6, ease: E },
-            { targets: image, x: baseX,         duration: speed * 0.4, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, x: baseX + hDist, duration: speed * 0.6, ease: E },
+              { targets: image, x: baseX, duration: speed * 0.4, ease: E },
+            ]
+          });
           break;
         case 'swipeUp':
           // CSS keyframes: 0%=0, 60%=-vDist, 100%=0; ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, y: baseY - vDist, duration: speed * 0.6, ease: E },
-            { targets: image, y: baseY,         duration: speed * 0.4, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, y: baseY - vDist, duration: speed * 0.6, ease: E },
+              { targets: image, y: baseY, duration: speed * 0.4, ease: E },
+            ]
+          });
           break;
         case 'swipeDown':
           // CSS keyframes: 0%=0, 60%=+vDist, 100%=0; ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, y: baseY + vDist, duration: speed * 0.6, ease: E },
-            { targets: image, y: baseY,         duration: speed * 0.4, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, y: baseY + vDist, duration: speed * 0.6, ease: E },
+              { targets: image, y: baseY, duration: speed * 0.4, ease: E },
+            ]
+          });
           break;
         case 'circle': {
           // CSS: linear ease (smooth circular path), keyframes at 0%/25%/50%/75%/100%
           const r = rDist || 14;
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX + r, y: baseY - r,        duration: speed * 0.25, ease: 'Linear' },
-            { targets: image, x: baseX,     y: baseY - r * 1.57, duration: speed * 0.25, ease: 'Linear' },
-            { targets: image, x: baseX - r, y: baseY - r,        duration: speed * 0.25, ease: 'Linear' },
-            { targets: image, x: baseX,     y: baseY,             duration: speed * 0.25, ease: 'Linear' },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, x: baseX + r, y: baseY - r, duration: speed * 0.25, ease: 'Linear' },
+              { targets: image, x: baseX, y: baseY - r * 1.57, duration: speed * 0.25, ease: 'Linear' },
+              { targets: image, x: baseX - r, y: baseY - r, duration: speed * 0.25, ease: 'Linear' },
+              { targets: image, x: baseX, y: baseY, duration: speed * 0.25, ease: 'Linear' },
+            ]
+          });
           break;
         }
       }
@@ -580,12 +594,12 @@ export class PlayclipScene extends Phaser.Scene {
       const entry = style?.entryAnimation;
       if (!entry || entry === 'none') { onComplete(); return; }
 
-      const dur  = style?.animationDuration ?? 500;
+      const dur = style?.animationDuration ?? 500;
       const ease = toEase(style?.animationEasing);
-      const opFrom   = style?.animationOpacityFrom  ?? 0;
-      const opTo     = style?.animationOpacityTo    ?? 1;
-      const scFrom   = style?.animationScaleFrom    ?? 0;
-      const scTo     = style?.animationScaleTo      ?? 1;
+      const opFrom = style?.animationOpacityFrom ?? 0;
+      const opTo = style?.animationOpacityTo ?? 1;
+      const scFrom = style?.animationScaleFrom ?? 0;
+      const scTo = style?.animationScaleTo ?? 1;
       const slideDist = style?.animationSlideDistance ?? 100;
 
       switch (entry) {
@@ -628,10 +642,10 @@ export class PlayclipScene extends Phaser.Scene {
       const exit = style?.exitAnimation;
       if (!exit || exit === 'none') { done(); return; }
 
-      const dur  = style?.animationDuration ?? 500;
+      const dur = style?.animationDuration ?? 500;
       const ease = toEase(style?.animationEasing);
-      const opTo      = style?.animationOpacityTo    ?? 0;
-      const scTo      = style?.animationScaleTo      ?? 0;
+      const opTo = style?.animationOpacityTo ?? 0;
+      const scTo = style?.animationScaleTo ?? 0;
       const slideDist = style?.animationSlideDistance ?? 100;
 
       switch (exit) {
@@ -819,19 +833,19 @@ export class PlayclipScene extends Phaser.Scene {
 
   // Full-screen post-roll overlay shown when the clip ends (or within its time
   // window). Background color lives in `content`; optional image in `imageUrl`.
+  // Color is always drawn first so transparent PNG regions match the editor.
   private buildEndcard(asset: PlayclipAsset): Overlay {
     const container = this.add.container(0, 0).setDepth(15);
     const imageKey = asset.imageUrl ? `endcard-${asset.id}` : undefined;
     const bgGraphics = this.add.graphics();
+    container.add(bgGraphics);
+
     const bgImage =
       imageKey && this.textures.exists(imageKey)
         ? this.add.image(0, 0, imageKey).setOrigin(0, 0)
         : undefined;
-
     if (bgImage) {
       container.add(bgImage);
-    } else {
-      container.add(bgGraphics);
     }
 
     return {
@@ -845,14 +859,14 @@ export class PlayclipScene extends Phaser.Scene {
         container.setPosition(cx, cy);
         container.setSize(rect.width, rect.height);
 
+        const color = cssColorToInt(asset.content || '#667eea') ?? 0x667eea;
+        bgGraphics.clear();
+        bgGraphics.fillStyle(color, 1);
+        bgGraphics.fillRect(-rect.width / 2, -rect.height / 2, rect.width, rect.height);
+
         if (bgImage) {
           bgImage.setPosition(-rect.width / 2, -rect.height / 2);
           bgImage.setDisplaySize(rect.width, rect.height);
-        } else {
-          const color = cssColorToInt(asset.content || '#667eea') ?? 0x667eea;
-          bgGraphics.clear();
-          bgGraphics.fillStyle(color, 1);
-          bgGraphics.fillRect(-rect.width / 2, -rect.height / 2, rect.width, rect.height);
         }
       },
     };
