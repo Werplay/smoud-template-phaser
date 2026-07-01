@@ -4,6 +4,7 @@ import { PLAYCLIP_DATA } from '../playclip-data';
 import type {
   AssetEntry,
   AssetStyle,
+  AudioAction,
   Orientation,
   OrientationValue,
   PlayclipAsset,
@@ -144,6 +145,12 @@ export class PlayclipScene extends Phaser.Scene {
   // end hook, e.g. Mintegral's window.gameEnd()).
   private finished = false;
 
+  // Audio assets and their native HTMLAudioElement instances.
+  private audioAssets: PlayclipAsset[] = [];
+  private audioElements: Map<string, HTMLAudioElement> = new Map();
+  private currentAudioId: string | null = null;
+  private videoMutedForAudio = false;
+
   // Timeline controls (seek-based playback behaviour).
   private loops: Control[] = [];
   private jumps: Control[] = [];
@@ -215,6 +222,17 @@ export class PlayclipScene extends Phaser.Scene {
     this.jumps = this.rawControls('jumps');
     this.freezes = this.rawControls('freezes');
     this.orientation = this.computeOrientation();
+
+    // Initialise audio assets — active ones with a URL, separate from visual overlays.
+    this.audioAssets = this.rawAssets().filter(
+      (a) => a.type === 'audio' && !!a.audioUrl && a.audioAction?.isActive !== false,
+    );
+    this.audioAssets.forEach((asset) => {
+      const el = new Audio(asset.audioUrl!);
+      el.volume = asset.audioAction?.volume ?? 0.5;
+      el.loop = asset.audioAction?.loop ?? false;
+      this.audioElements.set(asset.id, el);
+    });
 
     this.createVideo();
     this.createOverlays();
@@ -921,6 +939,78 @@ export class PlayclipScene extends Phaser.Scene {
     }
   }
 
+  // --- Audio playback -----------------------------------------------------
+
+  private applyAudio(t: number): void {
+    if (!this.started) return;
+
+    const v = this.video;
+    const isFrozen = !!this.currentFreeze;
+    const videoPaused = v?.isPaused() ?? true;
+
+    // Find the first audio asset whose time window covers the current playhead.
+    const activeAsset = this.audioAssets.find(
+      (a) => t >= a.time && t <= (a.endTime || a.time + 5),
+    ) ?? null;
+
+    if (activeAsset) {
+      const activeEl = this.audioElements.get(activeAsset.id);
+      if (!activeEl) return;
+
+      // Stop any other audio that might be playing.
+      this.audioElements.forEach((el, id) => {
+        if (id !== activeAsset.id && !el.paused) {
+          el.pause();
+          el.currentTime = 0;
+        }
+      });
+
+      // Mute/unmute the video based on the active audio's muteVideo flag (default: mute).
+      // If the active audio opts out, restore the video even if we had muted it earlier.
+      if (activeAsset.audioAction?.muteVideo !== false) {
+        if (!this.videoMutedForAudio) {
+          v?.setMute(true);
+          this.videoMutedForAudio = true;
+        }
+      } else if (this.videoMutedForAudio) {
+        v?.setMute(false);
+        this.videoMutedForAudio = false;
+      }
+
+      this.currentAudioId = activeAsset.id;
+      // Keep volume in sync with the asset value (may have changed).
+      activeEl.volume = (activeAsset.audioAction as AudioAction | undefined)?.volume ?? 0.5;
+
+      // Play when the video is running, or when frozen and playDuringFreeze is on.
+      const shouldPlay =
+        !videoPaused || (isFrozen && activeAsset.audioAction?.playDuringFreeze === true);
+
+      if (shouldPlay && activeEl.paused) {
+        const audioOffset = t - activeAsset.time;
+        if (audioOffset > 0 && isFinite(activeEl.duration) && audioOffset < activeEl.duration) {
+          activeEl.currentTime = audioOffset;
+        }
+        activeEl.play().catch(() => {});
+      } else if (!shouldPlay && !activeEl.paused) {
+        activeEl.pause();
+      }
+    } else {
+      // Nothing should be playing — stop all audio and restore video audio.
+      this.audioElements.forEach((el) => {
+        if (!el.paused) {
+          el.pause();
+          el.currentTime = 0;
+        }
+      });
+      this.currentAudioId = null;
+
+      if (this.videoMutedForAudio) {
+        v?.setMute(false);
+        this.videoMutedForAudio = false;
+      }
+    }
+  }
+
   // --- Per-frame & resize -------------------------------------------------
 
   update(): void {
@@ -942,6 +1032,8 @@ export class PlayclipScene extends Phaser.Scene {
     }
 
     const t = ready ? v!.getCurrentTime() : 0;
+
+    this.applyAudio(t);
 
     for (const overlay of this.overlays) {
       const start = overlay.asset.time;
@@ -1122,5 +1214,10 @@ export class PlayclipScene extends Phaser.Scene {
   shutdown(): void {
     this.scale.off('resize', this.relayout, this);
     this.input.off('pointerdown', this.onPointerDown, this);
+    this.audioElements.forEach((el) => {
+      el.pause();
+      el.src = '';
+    });
+    this.audioElements.clear();
   }
 }
