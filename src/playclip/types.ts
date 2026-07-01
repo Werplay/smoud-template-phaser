@@ -52,6 +52,14 @@ export interface ButtonAction {
   appStoreLink?: string | null;
 }
 
+export interface AudioAction {
+  volume?: number;
+  loop?: boolean;
+  isActive?: boolean;
+  muteVideo?: boolean;       // When true (default), mutes video while this asset plays
+  playDuringFreeze?: boolean; // When true, audio continues playing during a freeze control
+}
+
 export type AssetType =
   | 'text'
   | 'button'
@@ -71,6 +79,7 @@ export interface PlayclipAsset {
   buttonAction?: ButtonAction;
   imageUrl?: string;
   audioUrl?: string;
+  audioAction?: AudioAction;
   landscapeWidthPercentage?: number;
   landscapeHeightPercentage?: number;
   portraitWidthPercentage?: number;
