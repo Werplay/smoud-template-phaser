@@ -1,6 +1,13 @@
 import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { PLAYCLIP_DATA } from '../playclip-data';
+import { isEndcardVisible } from './endcard-visibility';
+import {
+  computePlaybackTime,
+  getPostRollConfig,
+  isPostRollComplete,
+  type PostRollConfig,
+} from './playback-time';
 import type {
   AssetEntry,
   AssetStyle,
@@ -28,6 +35,20 @@ function firstNumber(input: string | number | undefined, fallback: number): numb
   if (!input) return fallback;
   const match = String(input).match(/-?\d+(\.\d+)?/);
   return match ? parseFloat(match[0]) : fallback;
+}
+
+// Parse CSS padding shorthand (e.g. "8px 12px" -> { x: 8, y: 12 }).
+function paddingXY(
+  padding: string | undefined,
+  fallbackX: number,
+  fallbackY: number,
+): { x: number; y: number } {
+  if (!padding) return { x: fallbackX, y: fallbackY };
+  const nums = String(padding).match(/-?\d+(\.\d+)?/g);
+  if (!nums || nums.length === 0) return { x: fallbackX, y: fallbackY };
+  const x = parseFloat(nums[0]);
+  const y = nums.length > 1 ? parseFloat(nums[1]) : x;
+  return { x, y };
 }
 
 // Fit (natW x natH) inside (W x H) preserving aspect ratio, centered —
@@ -73,6 +94,11 @@ function cssColorToInt(color: string | undefined): number | undefined {
   }
 }
 
+function textBackgroundColor(color: string | undefined): string | undefined {
+  if (!color || color === 'transparent') return undefined;
+  return color;
+}
+
 function fontStyleString(style: AssetStyle): string {
   const parts: string[] = [];
   if (style.fontWeight === 'bold' || style.fontWeight === '700') parts.push('bold');
@@ -103,14 +129,23 @@ interface Control {
   endTime: number;
 }
 
-// Core subset of asset types this scene renders. Audio, transparent-button
-// and endcard are intentionally deferred.
+// Core overlay asset types rendered on the video timeline. Audio is deferred;
+// endcard is handled separately (full-screen post-roll).
 const SUPPORTED_TYPES: PlayclipAsset['type'][] = [
   'text',
   'image',
   'button',
   'transparent-button',
 ];
+
+// Draw order mirrors the editor: end card is the full-screen background; every
+// timeline overlay (text, image, buttons) renders above it.
+const DEPTH_VIDEO = 0;
+const DEPTH_ENDCARD = 10;
+const DEPTH_TEXT = 20;
+const DEPTH_IMAGE = 25;
+const DEPTH_BUTTON = 30;
+const DEPTH_TRANSPARENT_BUTTON = 35;
 
 // ---------------------------------------------------------------------------
 // Scene
@@ -122,6 +157,10 @@ export class PlayclipScene extends Phaser.Scene {
   private playclipData: PlayclipData = PLAYCLIP_DATA;
   private assets: PlayclipAsset[] = [];
   private overlays: Overlay[] = [];
+  private endcardAsset?: PlayclipAsset;
+  private endcardOverlay?: Overlay;
+  private videoEnded = false;
+  private postRollClockStart = 0;
 
   private video?: Phaser.GameObjects.Video;
   private videoRect: Rect = { left: 0, top: 0, width: 0, height: 0 };
@@ -189,6 +228,9 @@ export class PlayclipScene extends Phaser.Scene {
       if (asset.type === 'image' && asset.imageUrl) {
         this.load.image(`img-${asset.id}`, asset.imageUrl);
       }
+      if (asset.type === 'endcard' && asset.imageUrl) {
+        this.load.image(`endcard-${asset.id}`, asset.imageUrl);
+      }
     });
 
     // Load the video source(s) via the loader so the Video object is ready
@@ -210,7 +252,13 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.assets = this.rawAssets().filter((a) => SUPPORTED_TYPES.includes(a.type));
+    const allAssets = this.rawAssets();
+    const endcards = allAssets.filter((a) => a.type === 'endcard');
+    if (endcards.length > 1) {
+      console.warn('[PlayclipScene] Multiple endcard assets; using the first.');
+    }
+    this.endcardAsset = endcards[0];
+    this.assets = allAssets.filter((a) => SUPPORTED_TYPES.includes(a.type));
     this.loops = this.rawControls('loops');
     this.jumps = this.rawControls('jumps');
     this.freezes = this.rawControls('freezes');
@@ -218,6 +266,10 @@ export class PlayclipScene extends Phaser.Scene {
 
     this.createVideo();
     this.createOverlays();
+    if (this.endcardAsset) {
+      this.endcardOverlay = this.buildEndcard(this.endcardAsset);
+      this.endcardOverlay.root.setVisible(false);
+    }
     this.relayout();
 
     this.scale.on('resize', this.relayout, this);
@@ -247,11 +299,11 @@ export class PlayclipScene extends Phaser.Scene {
     const key = this.currentVideoKey();
     if (!key || !this.cache.video.exists(key)) {
       // No (loaded) video — create an empty object so layout calls are safe.
-      this.video = this.add.video(0, 0).setOrigin(0.5).setDepth(0);
+      this.video = this.add.video(0, 0).setOrigin(0.5).setDepth(DEPTH_VIDEO);
       return;
     }
 
-    const video = this.add.video(0, 0, key).setOrigin(0.5).setDepth(0);
+    const video = this.add.video(0, 0, key).setOrigin(0.5).setDepth(DEPTH_VIDEO);
     this.video = video;
     this.lastVideoKey = key;
     this.videoReady = true; // loader already prepared the texture + dimensions
@@ -275,7 +327,26 @@ export class PlayclipScene extends Phaser.Scene {
     // Guarded by `started` so the muted poster-decode pass (paused on the first
     // frame in update()) can't trigger a premature completion.
     video.on(Phaser.GameObjects.Events.VIDEO_COMPLETE, () => {
-      if (this.started) this.finishAd();
+      if (!this.started) return;
+      this.videoEnded = true;
+      video.setPaused(true);
+      const duration = video.getDuration();
+      if (Number.isFinite(duration) && duration > 0) {
+        video.setCurrentTime(duration);
+      }
+      if (this.endcardAsset && this.endcardOverlay) {
+        this.postRollClockStart = this.time.now;
+        const t = this.getPlaybackTime();
+        if (isEndcardVisible(this.endcardAsset, t, true)) {
+          this.endcardOverlay.wasVisible = true;
+          this.endcardOverlay.root.setVisible(true);
+        }
+        if (!this.getPostRollConfig()) {
+          this.finishAd();
+        }
+        return;
+      }
+      this.finishAd();
     });
 
     // A loaded-but-unplayed Phaser video renders nothing, so briefly play
@@ -349,38 +420,108 @@ export class PlayclipScene extends Phaser.Scene {
       : asset.landscapeHeightPercentage;
   }
 
+  // Editor font sizes are px in video-bounds space; recover that width from
+  // stored width % + style width when possible, else use a typical preview size.
+  private designVideoBounds(
+    asset: PlayclipAsset,
+    orientation: Orientation,
+    style: AssetStyle,
+    rect: Rect,
+  ): { width: number; height: number } {
+    const wPct = this.widthPct(asset, orientation);
+    const hPct = this.heightPct(asset, orientation);
+    const styleW = firstNumber(style.width, 0);
+    const styleH = firstNumber(style.height, 0);
+    if (wPct && wPct > 0 && styleW > 0 && hPct && hPct > 0 && styleH > 0) {
+      return { width: styleW / wPct, height: styleH / hPct };
+    }
+
+    const element = this.video?.video as HTMLVideoElement | undefined;
+    const natW = element?.videoWidth || this.video?.width || 0;
+    const natH = element?.videoHeight || this.video?.height || 0;
+    const refGameW = orientation === 'portrait' ? 360 : 640;
+    const refGameH = orientation === 'portrait' ? 640 : 360;
+    if (natW && natH) {
+      const ref = containRect(natW, natH, refGameW, refGameH);
+      return { width: ref.width, height: ref.height };
+    }
+    return { width: rect.width || refGameW, height: rect.height || refGameH };
+  }
+
+  // Editor anchors the centre of a fixed box (style width/height or stored %).
+  private textBoxDimensions(
+    asset: PlayclipAsset,
+    rect: Rect,
+    orientation: Orientation,
+    style: AssetStyle,
+    scale: number,
+  ): { width: number; height: number } {
+    const wPct = this.widthPct(asset, orientation);
+    const hPct = this.heightPct(asset, orientation);
+    const styleW = firstNumber(style.width, 60);
+    const styleH = firstNumber(style.height, 40);
+    const width = wPct ? wPct * rect.width : styleW * scale;
+    const height = hPct ? hPct * rect.height : styleH * scale;
+    return { width: Math.max(1, width), height: Math.max(1, height) };
+  }
+
+  private layoutTextOverlay(
+    text: Phaser.GameObjects.Text,
+    asset: PlayclipAsset,
+    rect: Rect,
+    orientation: Orientation,
+  ): void {
+    const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
+    const design = this.designVideoBounds(asset, orientation, st, rect);
+    const scale = design.width > 0 ? rect.width / design.width : 1;
+    const baseFont = st.fontSize ?? 16;
+    const fontSize = Math.max(1, baseFont * scale);
+
+    const { x: padX, y: padY } = paddingXY(st.padding, 8, 12);
+    const scaledPadX = padX * scale;
+    const scaledPadY = padY * scale;
+    const box = this.textBoxDimensions(asset, rect, orientation, st, scale);
+
+    text.setText(asset.content || '');
+    text.setStyle({
+      fontFamily: st.fontFamily || 'Arial, sans-serif',
+      fontSize: `${fontSize}px`,
+      color: st.color || '#ffffff',
+      fontStyle: fontStyleString(st),
+      align: st.textAlign || 'center',
+      backgroundColor: textBackgroundColor(st.backgroundColor),
+    });
+    text.setPadding(scaledPadX, scaledPadY, scaledPadX, scaledPadY);
+    text.setWordWrapWidth(Math.max(1, box.width - scaledPadX * 2), true);
+    text.setFixedSize(box.width, box.height);
+
+    const c = this.centerOf(asset, rect, orientation);
+    text.setPosition(c.x, c.y);
+    text.setAngle(st.rotation || 0);
+    text.setFlipX(!!st.flipX);
+    text.setFlipY(!!st.flipY);
+  }
+
   private buildText(asset: PlayclipAsset): Overlay {
     const style = (pickOriented(asset.style, this.orientation) || {}) as AssetStyle;
     const text = this.add
       .text(0, 0, asset.content || '', {
         fontFamily: style.fontFamily || 'Arial, sans-serif',
-        fontSize: `${style.fontSize || 24}px`,
+        fontSize: `${style.fontSize ?? 16}px`,
         color: style.color || '#ffffff',
         fontStyle: fontStyleString(style),
         align: style.textAlign || 'center',
-        backgroundColor: style.backgroundColor || undefined,
+        backgroundColor: textBackgroundColor(style.backgroundColor),
       })
       .setOrigin(0.5)
-      .setDepth(10);
-
-    const pad = firstNumber(style.padding, 0);
-    if (pad) text.setPadding(pad);
+      .setDepth(DEPTH_TEXT);
 
     return {
       asset,
       root: text,
       clicked: false,
       wasVisible: false,
-      layout: (rect, orientation) => {
-        const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
-        text.setFontSize(st.fontSize || 24);
-        text.setColor(st.color || '#ffffff');
-        const c = this.centerOf(asset, rect, orientation);
-        text.setPosition(c.x, c.y);
-        text.setAngle(st.rotation || 0);
-        text.setFlipX(!!st.flipX);
-        text.setFlipY(!!st.flipY);
-      },
+      layout: (rect, orientation) => this.layoutTextOverlay(text, asset, rect, orientation),
     };
   }
 
@@ -389,7 +530,7 @@ export class PlayclipScene extends Phaser.Scene {
     const image = this.textures.exists(key)
       ? this.add.image(0, 0, key)
       : this.add.image(0, 0, '__MISSING');
-    image.setOrigin(0.5).setDepth(10);
+    image.setOrigin(0.5).setDepth(DEPTH_IMAGE);
 
     // Base position/scale updated by layout() on every resize.
     let baseX = 0;
@@ -478,11 +619,13 @@ export class PlayclipScene extends Phaser.Scene {
           break;
         case 'shake':
           // CSS keyframes at 0%, 25%, 75%, 100% with hardcoded ±2px, 0.5s ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX - 2, duration: speed * 0.25, ease: E },
-            { targets: image, x: baseX + 2, duration: speed * 0.5,  ease: E },
-            { targets: image, x: baseX,     duration: speed * 0.25, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, x: baseX - 2, duration: speed * 0.25, ease: E },
+              { targets: image, x: baseX + 2, duration: speed * 0.5, ease: E },
+              { targets: image, x: baseX, duration: speed * 0.25, ease: E },
+            ]
+          });
           break;
         case 'float':
           // CSS: translateY(0) rotate(0) → translateY(-3px) rotate(1deg) → back, 3s ease-in-out
@@ -493,50 +636,62 @@ export class PlayclipScene extends Phaser.Scene {
           // HTML builder converts: --gesture-tap-depth = Math.min(1, gestureDistance / 100)
           const tapDist = style?.gestureDistance ?? 18;
           const depth = Math.min(1, tapDist / 100);
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, scaleX: baseScaleX * (1 - depth), scaleY: baseScaleY * (1 - depth), duration: speed * 0.4,  ease: E },
-            { targets: image, scaleX: baseScaleX * 1.04,        scaleY: baseScaleY * 1.04,        duration: speed * 0.25, ease: E },
-            { targets: image, scaleX: baseScaleX,               scaleY: baseScaleY,               duration: speed * 0.35, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, scaleX: baseScaleX * (1 - depth), scaleY: baseScaleY * (1 - depth), duration: speed * 0.4, ease: E },
+              { targets: image, scaleX: baseScaleX * 1.04, scaleY: baseScaleY * 1.04, duration: speed * 0.25, ease: E },
+              { targets: image, scaleX: baseScaleX, scaleY: baseScaleY, duration: speed * 0.35, ease: E },
+            ]
+          });
           break;
         }
         case 'swipeLeft':
           // CSS keyframes: 0%=0, 60%=-hDist, 100%=0; ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX - hDist, duration: speed * 0.6, ease: E },
-            { targets: image, x: baseX,         duration: speed * 0.4, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, x: baseX - hDist, duration: speed * 0.6, ease: E },
+              { targets: image, x: baseX, duration: speed * 0.4, ease: E },
+            ]
+          });
           break;
         case 'swipeRight':
           // CSS keyframes: 0%=0, 60%=+hDist, 100%=0; ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX + hDist, duration: speed * 0.6, ease: E },
-            { targets: image, x: baseX,         duration: speed * 0.4, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, x: baseX + hDist, duration: speed * 0.6, ease: E },
+              { targets: image, x: baseX, duration: speed * 0.4, ease: E },
+            ]
+          });
           break;
         case 'swipeUp':
           // CSS keyframes: 0%=0, 60%=-vDist, 100%=0; ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, y: baseY - vDist, duration: speed * 0.6, ease: E },
-            { targets: image, y: baseY,         duration: speed * 0.4, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, y: baseY - vDist, duration: speed * 0.6, ease: E },
+              { targets: image, y: baseY, duration: speed * 0.4, ease: E },
+            ]
+          });
           break;
         case 'swipeDown':
           // CSS keyframes: 0%=0, 60%=+vDist, 100%=0; ease-in-out
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, y: baseY + vDist, duration: speed * 0.6, ease: E },
-            { targets: image, y: baseY,         duration: speed * 0.4, ease: E },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, y: baseY + vDist, duration: speed * 0.6, ease: E },
+              { targets: image, y: baseY, duration: speed * 0.4, ease: E },
+            ]
+          });
           break;
         case 'circle': {
           // CSS: linear ease (smooth circular path), keyframes at 0%/25%/50%/75%/100%
           const r = rDist || 14;
-          this.tweens.chain({ loop: -1, tweens: [
-            { targets: image, x: baseX + r, y: baseY - r,        duration: speed * 0.25, ease: 'Linear' },
-            { targets: image, x: baseX,     y: baseY - r * 1.57, duration: speed * 0.25, ease: 'Linear' },
-            { targets: image, x: baseX - r, y: baseY - r,        duration: speed * 0.25, ease: 'Linear' },
-            { targets: image, x: baseX,     y: baseY,             duration: speed * 0.25, ease: 'Linear' },
-          ]});
+          this.tweens.chain({
+            loop: -1, tweens: [
+              { targets: image, x: baseX + r, y: baseY - r, duration: speed * 0.25, ease: 'Linear' },
+              { targets: image, x: baseX, y: baseY - r * 1.57, duration: speed * 0.25, ease: 'Linear' },
+              { targets: image, x: baseX - r, y: baseY - r, duration: speed * 0.25, ease: 'Linear' },
+              { targets: image, x: baseX, y: baseY, duration: speed * 0.25, ease: 'Linear' },
+            ]
+          });
           break;
         }
       }
@@ -548,12 +703,12 @@ export class PlayclipScene extends Phaser.Scene {
       const entry = style?.entryAnimation;
       if (!entry || entry === 'none') { onComplete(); return; }
 
-      const dur  = style?.animationDuration ?? 500;
+      const dur = style?.animationDuration ?? 500;
       const ease = toEase(style?.animationEasing);
-      const opFrom   = style?.animationOpacityFrom  ?? 0;
-      const opTo     = style?.animationOpacityTo    ?? 1;
-      const scFrom   = style?.animationScaleFrom    ?? 0;
-      const scTo     = style?.animationScaleTo      ?? 1;
+      const opFrom = style?.animationOpacityFrom ?? 0;
+      const opTo = style?.animationOpacityTo ?? 1;
+      const scFrom = style?.animationScaleFrom ?? 0;
+      const scTo = style?.animationScaleTo ?? 1;
       const slideDist = style?.animationSlideDistance ?? 100;
 
       switch (entry) {
@@ -596,10 +751,10 @@ export class PlayclipScene extends Phaser.Scene {
       const exit = style?.exitAnimation;
       if (!exit || exit === 'none') { done(); return; }
 
-      const dur  = style?.animationDuration ?? 500;
+      const dur = style?.animationDuration ?? 500;
       const ease = toEase(style?.animationEasing);
-      const opTo      = style?.animationOpacityTo    ?? 0;
-      const scTo      = style?.animationScaleTo      ?? 0;
+      const opTo = style?.animationOpacityTo ?? 0;
+      const scTo = style?.animationScaleTo ?? 0;
       const slideDist = style?.animationSlideDistance ?? 100;
 
       switch (exit) {
@@ -701,7 +856,7 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   private buildButton(asset: PlayclipAsset): Overlay {
-    const container = this.add.container(0, 0).setDepth(20);
+    const container = this.add.container(0, 0).setDepth(DEPTH_BUTTON);
     const graphics = this.add.graphics();
     const label = this.add.text(0, 0, asset.content || '', { fontSize: '20px' }).setOrigin(0.5);
     container.add([graphics, label]);
@@ -765,7 +920,7 @@ export class PlayclipScene extends Phaser.Scene {
   // renders nothing but occupies a hit region sized from its width/height
   // percentages; the tap is dispatched from onPointerDown like a normal button.
   private buildTransparentButton(asset: PlayclipAsset): Overlay {
-    const container = this.add.container(0, 0).setDepth(25);
+    const container = this.add.container(0, 0).setDepth(DEPTH_TRANSPARENT_BUTTON);
 
     return {
       asset,
@@ -785,6 +940,47 @@ export class PlayclipScene extends Phaser.Scene {
     };
   }
 
+  // Full-screen post-roll overlay shown when the clip ends (or within its time
+  // window). Background color lives in `content`; optional image in `imageUrl`.
+  // Color is always drawn first so transparent PNG regions match the editor.
+  private buildEndcard(asset: PlayclipAsset): Overlay {
+    const container = this.add.container(0, 0).setDepth(DEPTH_ENDCARD);
+    const imageKey = asset.imageUrl ? `endcard-${asset.id}` : undefined;
+    const bgGraphics = this.add.graphics();
+    container.add(bgGraphics);
+
+    const bgImage =
+      imageKey && this.textures.exists(imageKey)
+        ? this.add.image(0, 0, imageKey).setOrigin(0, 0)
+        : undefined;
+    if (bgImage) {
+      container.add(bgImage);
+    }
+
+    return {
+      asset,
+      root: container,
+      clicked: false,
+      wasVisible: false,
+      layout: (rect, _orientation) => {
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        container.setPosition(cx, cy);
+        container.setSize(rect.width, rect.height);
+
+        const color = cssColorToInt(asset.content || '#667eea') ?? 0x667eea;
+        bgGraphics.clear();
+        bgGraphics.fillStyle(color, 1);
+        bgGraphics.fillRect(-rect.width / 2, -rect.height / 2, rect.width, rect.height);
+
+        if (bgImage) {
+          bgImage.setPosition(-rect.width / 2, -rect.height / 2);
+          bgImage.setDisplaySize(rect.width, rect.height);
+        }
+      },
+    };
+  }
+
   // --- Interaction --------------------------------------------------------
 
   // An overlay accepts taps if it's a button, a transparent-button, or an image
@@ -795,6 +991,45 @@ export class PlayclipScene extends Phaser.Scene {
       overlay.asset.type === 'transparent-button' ||
       (overlay.asset.type === 'image' && !!overlay.asset.buttonAction)
     );
+  }
+
+  private hasVisiblePlayableOverlay(time: number): boolean {
+    for (const overlay of this.overlays) {
+      if (!this.isInteractive(overlay) || overlay.clicked) continue;
+      const start = overlay.asset.time;
+      const end = overlay.asset.endTime || overlay.asset.time + 5;
+      if (time < start || time > end) continue;
+      const node = overlay.root as unknown as { visible: boolean };
+      if (!node.visible) continue;
+      return true;
+    }
+    return false;
+  }
+
+  private isEndcardClickable(time: number): boolean {
+    if (!this.endcardAsset || !this.endcardOverlay) return false;
+    const root = this.endcardOverlay.root as unknown as { visible: boolean };
+    if (!root.visible) return false;
+    if (!this.videoReady || !this.video) return false;
+    if (!this.video.isPaused() && !this.videoEnded) return false;
+    if (!isEndcardVisible(this.endcardAsset, time, this.videoEnded)) return false;
+    if (!this.videoEnded && this.hasVisiblePlayableOverlay(time)) return false;
+    return true;
+  }
+
+  private pointerHitsVideoRect(px: number, py: number): boolean {
+    const r = this.videoRect;
+    return (
+      px >= r.left &&
+      px <= r.left + r.width &&
+      py >= r.top &&
+      py <= r.top + r.height
+    );
+  }
+
+  private activateEndcard(): void {
+    sdk.install();
+    this.finishAd();
   }
 
   // Single entry point for all taps. The very first tap anywhere only starts
@@ -812,6 +1047,7 @@ export class PlayclipScene extends Phaser.Scene {
     // are centre-origin, so centre ± displayWidth/2 covers each case uniformly.
     const px = pointer.worldX;
     const py = pointer.worldY;
+    let handled = false;
     for (const overlay of this.overlays) {
       if (!this.isInteractive(overlay) || overlay.clicked) continue;
       const node = overlay.root as unknown as {
@@ -831,7 +1067,15 @@ export class PlayclipScene extends Phaser.Scene {
         py <= node.y + halfH
       ) {
         this.activateButton(overlay);
+        handled = true;
         break;
+      }
+    }
+
+    if (!handled) {
+      const t = this.getPlaybackTime();
+      if (this.isEndcardClickable(t) && this.pointerHitsVideoRect(px, py)) {
+        this.activateEndcard();
       }
     }
   }
@@ -923,6 +1167,25 @@ export class PlayclipScene extends Phaser.Scene {
 
   // --- Per-frame & resize -------------------------------------------------
 
+  private getPostRollConfig(): PostRollConfig | null {
+    if (!this.endcardAsset || !this.video) return null;
+    const duration = this.video.getDuration();
+    const videoDuration =
+      Number.isFinite(duration) && duration > 0
+        ? duration
+        : this.endcardAsset.time;
+    return getPostRollConfig(this.endcardAsset, videoDuration);
+  }
+
+  /** Timeline clock for overlay visibility (includes synthetic post-roll time). */
+  private getPlaybackTime(): number {
+    const videoTime = this.video?.getCurrentTime() ?? 0;
+    if (!this.videoEnded) return videoTime;
+    const postRoll = this.getPostRollConfig();
+    const elapsed = (this.time.now - this.postRollClockStart) / 1000;
+    return computePlaybackTime(videoTime, this.videoEnded, postRoll, elapsed);
+  }
+
   update(): void {
     const v = this.video;
     const ready = !!v && this.videoReady;
@@ -933,7 +1196,7 @@ export class PlayclipScene extends Phaser.Scene {
         v!.setPaused(true);
         this.posterHeld = true;
       }
-    } else if (ready) {
+    } else if (ready && !this.videoEnded) {
       // A freeze holds the playhead until a button breaks out of it; while held,
       // don't let loops/jumps move it. Otherwise loops/jumps may seek the
       // playhead before we evaluate visibility.
@@ -941,7 +1204,17 @@ export class PlayclipScene extends Phaser.Scene {
       this.applyFreezes(v!);
     }
 
-    const t = ready ? v!.getCurrentTime() : 0;
+    const postRoll = this.videoEnded ? this.getPostRollConfig() : null;
+    const t = this.getPlaybackTime();
+
+    if (
+      this.videoEnded &&
+      postRoll &&
+      isPostRollComplete(t, postRoll) &&
+      !this.finished
+    ) {
+      this.finishAd();
+    }
 
     for (const overlay of this.overlays) {
       const start = overlay.asset.time;
@@ -969,6 +1242,26 @@ export class PlayclipScene extends Phaser.Scene {
       // Re-arm an interactive overlay once it leaves its window so it can be
       // pressed again if its time range comes back around (e.g. a looping intro).
       if (this.isInteractive(overlay) && !within) overlay.clicked = false;
+    }
+
+    this.updateEndcardVisibility(t);
+  }
+
+  private updateEndcardVisibility(time: number): void {
+    if (!this.endcardAsset || !this.endcardOverlay) return;
+
+    const shouldShow = isEndcardVisible(this.endcardAsset, time, this.videoEnded);
+    const overlay = this.endcardOverlay;
+
+    if (shouldShow && !overlay.wasVisible) {
+      overlay.wasVisible = true;
+      overlay.root.setVisible(true);
+    } else if (!shouldShow && overlay.wasVisible) {
+      overlay.wasVisible = false;
+      overlay.root.setVisible(false);
+      if (this.videoEnded && !this.finished) {
+        this.finishAd();
+      }
     }
   }
 
@@ -1070,6 +1363,7 @@ export class PlayclipScene extends Phaser.Scene {
     this.maybeSwapVideoSource();
     this.layoutVideo();
     this.overlays.forEach((overlay) => overlay.layout(this.videoRect, this.orientation));
+    this.endcardOverlay?.layout(this.videoRect, this.orientation);
     this.updateCropMask();
   };
 
@@ -1094,7 +1388,10 @@ export class PlayclipScene extends Phaser.Scene {
 
     const mask = this.cropMask;
     if (!mask) return;
-    this.overlays.forEach((overlay) => {
+    const masked = this.endcardOverlay
+      ? [...this.overlays, this.endcardOverlay]
+      : this.overlays;
+    masked.forEach((overlay) => {
       const root = overlay.root as unknown as {
         setMask?: (m: Phaser.Display.Masks.GeometryMask) => void;
       };
