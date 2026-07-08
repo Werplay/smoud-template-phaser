@@ -54,6 +54,7 @@ export interface ButtonAction {
 
 export interface AudioAction {
   volume?: number;
+  speed?: number; // Playback rate: 0.25, 0.5, 0.75, 1 (default), 1.25, 1.5, 2
   loop?: boolean;
   isActive?: boolean;
   muteVideo?: boolean;       // When true (default), mutes video while this asset plays

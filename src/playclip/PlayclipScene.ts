@@ -278,6 +278,7 @@ export class PlayclipScene extends Phaser.Scene {
     this.audioAssets.forEach((asset) => {
       const el = new Audio(asset.audioUrl!);
       el.volume = asset.audioAction?.volume ?? 0.5;
+      el.playbackRate = asset.audioAction?.speed ?? 1;
       el.loop = asset.audioAction?.loop ?? false;
       this.audioElements.set(asset.id, el);
     });
@@ -1222,8 +1223,9 @@ export class PlayclipScene extends Phaser.Scene {
       }
 
       this.currentAudioId = activeAsset.id;
-      // Keep volume in sync with the asset value (may have changed).
+      // Keep volume and playback rate in sync with the asset value (may have changed).
       activeEl.volume = (activeAsset.audioAction as AudioAction | undefined)?.volume ?? 0.5;
+      activeEl.playbackRate = (activeAsset.audioAction as AudioAction | undefined)?.speed ?? 1;
 
       // Play when the video is running, or when frozen and playDuringFreeze is on.
       const shouldPlay =
