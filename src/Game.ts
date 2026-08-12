@@ -100,7 +100,10 @@ class MainScene extends Phaser.Scene {
 
     // Make button interactive
     buttonBackground.setInteractive({ useHandCursor: true });
-    buttonBackground.on('pointerdown', () => sdk.install());
+    buttonBackground.on('pointerdown', () => {
+      sdk.install();
+      sdk.finish();
+    });
 
     // Set up interaction listener
     sdk.on('interaction', (count: number) => {
