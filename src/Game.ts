@@ -3,8 +3,33 @@ import * as Phaser from 'phaser';
 // Using assets/* alias configured in tsconfig.json for direct assets import
 import buttonBg from 'assets/button.png';
 
+// Used when the app-constants script is missing or a field was removed, so a
+// stripped-down HTML still runs instead of throwing at boot.
+const DEFAULT_TEXT: GameDataText = {
+  label: 'Headline',
+  type: 'text',
+  tooltip: 'Headline shown in the middle of the screen',
+  value: 'Tap to Play',
+  FontSize: 24,
+  TextColor: '#ffffff',
+  OriginX: 0.5,
+  OriginY: 0.5,
+  Align: 'center',
+  StrokeColor: '#000000',
+  StrokeThickness: 2
+};
+
+function textField(): GameDataText {
+  const data = typeof GameData === 'undefined' ? undefined : GameData;
+  return { ...DEFAULT_TEXT, ...data?.Text };
+}
+
+// Gap between the headline and the install button, in unscaled pixels.
+const BUTTON_OFFSET_Y = 110;
+
 class MainScene extends Phaser.Scene {
   private installButton!: Phaser.GameObjects.Container;
+  private headline!: Phaser.GameObjects.Text;
 
   constructor() {
     super({ key: 'MainScene' });
@@ -18,8 +43,25 @@ class MainScene extends Phaser.Scene {
     // Set up resize listener
     sdk.on('resize', this.resize, this);
 
-    // Create container for button positioning
-    this.installButton = this.add.container(this.cameras.main.centerX, this.cameras.main.centerY);
+    // Headline from the editor's GameData, dead centre.
+    const text = textField();
+    this.headline = this.add
+      .text(this.cameras.main.centerX, this.cameras.main.centerY, text.value, {
+        fontFamily: 'cursive',
+        fontSize: `${text.FontSize}px`,
+        color: text.TextColor,
+        align: text.Align,
+        stroke: text.StrokeColor,
+        strokeThickness: text.StrokeThickness
+      })
+      .setOrigin(text.OriginX, text.OriginY);
+
+    // Create container for button positioning. Sits below the headline now that
+    // the headline owns the centre.
+    this.installButton = this.add.container(
+      this.cameras.main.centerX,
+      this.cameras.main.centerY + BUTTON_OFFSET_Y
+    );
 
     // Create animation container
     const animationContainer = this.add.container(0, 0);
@@ -78,8 +120,13 @@ class MainScene extends Phaser.Scene {
     const scaleY = height / 480;
     const scale = Math.min(scaleX, scaleY); // Use smaller scale to fit both dimensions
 
+    if (this.headline) {
+      this.headline.setPosition(width / 2, height / 2);
+      this.headline.setScale(scale);
+    }
+
     if (this.installButton) {
-      this.installButton.setPosition(width / 2, height / 2);
+      this.installButton.setPosition(width / 2, height / 2 + BUTTON_OFFSET_Y * scale);
       this.installButton.setScale(scale);
     }
   };

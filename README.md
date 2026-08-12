@@ -46,6 +46,51 @@ Try out this template:
 - `src/index.html` - HTML template
 - `assets/` - Directory for your game assets (sprites, textures, etc.)
 
+## Universal build (one HTML, any network)
+
+```bash
+npm run build:universal   # -> dist/..._Universal.html
+node check-universal.mjs  # asserts every network branch survived
+```
+
+Normally `AD_NETWORK` is a compile-time literal, so Terser strips all 21 other
+networks and you need one build per network. `build.json`'s `defines` block
+points `AD_NETWORK`/`AD_PROTOCOL` at `window.__NET__`/`window.__PROTO__` instead,
+so nothing is stripped and a single HTML serves every network. The detector at
+the top of `src/index.html` picks the network by probing for that network's host
+global (`ExitApi` → google, `FbPlayableAd` → facebook, `mraid` → MRAID, ...).
+
+Costs ~5 KB over a single-network build.
+
+### For the editor tool
+
+The detector script carries `apiVersion="2"`, which is how the playable editor
+recognises a runtime-network build and routes it to `/api/export/v2` (pin the
+network) instead of the v1 callback-injection pipeline. The build's HTML
+minifier lowercases it to `apiversion="2"`, so match it case-insensitively.
+
+Auto-detection needs no injection. To **pin** a network instead, set the global
+before the detector runs — the detector leaves an existing value alone:
+
+```html
+<script>window.__NET__ = 'vungle'; window.__PROTO__ = 'none';</script>
+```
+
+Pin both: the detector defines the pair together, so it skips `__PROTO__` too
+once `__NET__` exists.
+
+Pinning is required for networks with no unique global: **vungle** and
+**moloco**. It is optional for the 11 MRAID networks (ironsource, applovin,
+unity, appreciate, chartboost, mytarget, liftoff, adcolony, adikteev, bigabid,
+inmobi) and for **pangle** — they auto-detect to a sibling with identical CTA
+behaviour, so only the reported name differs.
+
+Still the editor's job, since they are not JavaScript:
+
+- `<head>` script tags — `mraid.js`, `exitapi.js`, the Pangle CDN script
+- google's `ad.size` / `ad.orientation` meta tags
+- zip packaging, and `config.json` for tiktok / snapchat
+
 ## Looking for More?
 
 Check out other available templates for different frameworks and use cases:

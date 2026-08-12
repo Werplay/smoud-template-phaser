@@ -3,5 +3,10 @@
   "name": "Template",
   "version": "v1",
   "google_play_url": "https://play.google.com/store/games",
-  "app_store_url": "https://www.apple.com/app-store/"
+  "app_store_url": "https://www.apple.com/app-store/",
+  "adNetworkNames": { "preview": "Universal" },
+  "defines": {
+    "AD_NETWORK": "window.__NET__",
+    "AD_PROTOCOL": "window.__PROTO__"
+  }
 }

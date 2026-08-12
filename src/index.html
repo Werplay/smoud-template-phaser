@@ -3,6 +3,70 @@
   <head>
     <meta charset="UTF-8" />
     <title>Phaser Playable Template</title>
+    <!--
+      Ad network auto-detection. Must stay above the bundle: the bundle is an
+      inline <script defer>, and defer is ignored on inline scripts.
+      AD_NETWORK / AD_PROTOCOL are compiled to window.__NET__ / window.__PROTO__
+      (see build.json "defines"), so every network's branch survives Terser.
+      Getters, not values: some containers load mraid.js after this HTML parses.
+      To pin a network instead, set window.__NET__ before this script runs.
+
+      apiVersion="2" marks this HTML as a runtime-network build. The playable
+      editor detects that attribute and exports via /api/export/v2 (pin the
+      network) instead of recompiling per network.
+    -->
+    <script apiVersion="2">
+      (function (w) {
+        if ('__NET__' in w) return;
+        Object.defineProperty(w, '__NET__', {
+          get: function () {
+            if (w.ExitApi) return 'google';
+            if (w.ScPlayableAd) return 'snapchat';
+            if (w.FbPlayableAd) return 'facebook';
+            if (w.TJ_API) return 'tapjoy';
+            if (w.smxTracking) return 'smadex';
+            if (w.openAppStore) return 'tiktok';
+            if (w.gameReady) return 'mintegral';
+            if (w.mraid) return 'unity';
+            if (w.dapi) return 'moloco';
+            return 'preview';
+          }
+        });
+        Object.defineProperty(w, '__PROTO__', {
+          get: function () {
+            return w.mraid ? 'mraid' : w.dapi ? 'dapi' : 'none';
+          }
+        });
+      })(window);
+    </script>
+    <!--
+      Editable fields for the playable editor. It parses this script's source
+      to build its form, so keep it plain readable JS - no bundling, no minifying.
+      `label`/`type`/`tooltip`/`value` drive the input; the capitalised keys are
+      the text style the editor's advanced panel writes back.
+
+      `var`, not `const`: a top-level var in a classic script also lands on
+      window, so window.GameData works. A const only creates a lexical binding,
+      which the bundle can still read but nothing can see from the console.
+    -->
+    <script id="app-constants">
+      var GameData = {
+        Text: {
+          label: 'Headline',
+          type: 'text',
+          tooltip: 'Headline shown in the middle of the screen',
+          value: 'Tap to Play',
+
+          FontSize: 24,
+          TextColor: '#ffffff',
+          OriginX: 0.5,
+          OriginY: 0.5,
+          Align: 'center',
+          StrokeColor: '#000000',
+          StrokeThickness: 2
+        }
+      }
+    </script>
   </head>
   <body>
   </body>
