@@ -1,6 +1,6 @@
 import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
-import { GAME_DATA } from '../game-data';
+import { getDoc } from './doc-source';
 import { orientationOf, resolveTransform, rootPlacement, type Size } from './layout';
 import type { Behavior, Condition, Easing, GameAction, GameDoc, GameNode, Orientation, Outcome, Transform } from './types';
 
@@ -38,7 +38,7 @@ interface LiveNode {
 }
 
 export class GameScene extends Phaser.Scene {
-  private doc: GameDoc = GAME_DATA;
+  private doc: GameDoc = getDoc();
   private live = new Map<string, LiveNode>();
   private counters = new Map<string, number>();
   private audio = new Map<string, HTMLAudioElement>();
@@ -51,6 +51,21 @@ export class GameScene extends Phaser.Scene {
   }
 
   // --- lifecycle ------------------------------------------------------------
+
+  /**
+   * Phaser reuses the scene instance across a restart, so every field the last
+   * run touched is reset here. The editor restarts on each document change; a
+   * counter or a spawned node surviving that would make the preview disagree
+   * with a fresh load of the same document.
+   */
+  init(): void {
+    this.doc = getDoc();
+    this.live = new Map();
+    this.counters = new Map();
+    this.audio = new Map();
+    this.state = '';
+    this.finished = false;
+  }
 
   preload(): void {
     // Images arrive as data URIs (embedded at export) or URLs (editor preview);
