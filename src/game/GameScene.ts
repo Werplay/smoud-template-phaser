@@ -439,16 +439,26 @@ export class GameScene extends Phaser.Scene {
     if (parent) parent.add(object);
     this.applyTransform(entry);
 
+    let tappable = false;
+
     for (const component of node.components) {
       if (component.type === 'counter') {
         this.counters.set(component.key, component.initial);
       } else if (component.type === 'tappable' && component.enabled) {
         this.makeTappable(node, object, component.paddingX, component.paddingY);
+        tappable = true;
       } else if (component.type === 'audio' && component.autoPlay) {
         this.playSound(component.assetId, component.volume, component.loop);
       } else if (SKIPPED_COMPONENTS.indexOf(component.type) !== -1) {
         console.warn(`[GameScene] "${component.type}" on ${node.id} is not interpreted yet`);
       }
+    }
+
+    // A tap behaviour is itself a declaration that the node is tappable. Without
+    // this, authoring "on tap" on a node that has no tappable component produces
+    // a behaviour that can never fire and says nothing about why.
+    if (!tappable && node.behaviors.some((behavior) => behavior.event.on === 'tap')) {
+      this.makeTappable(node, object, 0, 0);
     }
 
     const container = object instanceof Phaser.GameObjects.Container ? object : undefined;
