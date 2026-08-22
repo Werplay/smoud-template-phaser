@@ -192,13 +192,16 @@ export class GameScene extends Phaser.Scene {
         ? rootOffsetFromScreen(placed, entry.transform, design, this.viewport())
         : { x: placed.x, y: placed.y };
 
-      entry.transform = { ...entry.transform, x: offset.x, y: offset.y };
-      this.onEditorAction?.({
-        type: 'game-editor:moved',
-        nodeId: entry.node.id,
-        x: Math.round(offset.x),
-        y: Math.round(offset.y)
-      });
+      const x = Math.round(offset.x);
+      const y = Math.round(offset.y);
+
+      // A click is a drag of zero distance. Reporting it would put an edit in
+      // the undo stack for merely selecting something.
+      if (x !== Math.round(entry.transform.x) || y !== Math.round(entry.transform.y)) {
+        entry.transform = { ...entry.transform, x, y };
+        this.onEditorAction?.({ type: 'game-editor:moved', nodeId: entry.node.id, x, y });
+      }
+
       this.drawSelection();
     });
   }
