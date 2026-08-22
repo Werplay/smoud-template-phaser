@@ -2,14 +2,23 @@ import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { getDoc } from './doc-source';
 import { orientationOf, resolveTransform, rootOffsetFromScreen, rootPlacement, type Size } from './layout';
-import type { Behavior, Condition, Easing, GameAction, GameDoc, GameNode, Orientation, Outcome, Transform } from './types';
+import type {
+  Behavior,
+  Condition,
+  Easing,
+  GameAction,
+  GameComponent,
+  GameDoc,
+  GameNode,
+  Orientation,
+  Outcome,
+  Transform
+} from './types';
 
-// ponytail: this pass interprets rendering, layout, tap and the non-physics
-// actions — enough to author, preview and export a static, tappable playable.
-// Physics bodies, spawners, timers, drag and drop zones are parsed and ignored
-// until the physics pass; they are listed in SKIPPED_COMPONENTS so an author is
-// warned rather than left wondering why nothing happened.
-const SKIPPED_COMPONENTS = ['body', 'spawner', 'timer', 'draggable', 'dropZone'];
+// ponytail: spawners, draggable and drop zones are parsed and ignored for now.
+// They are listed in SKIPPED_COMPONENTS so an author is warned rather than left
+// wondering why nothing happened.
+const SKIPPED_COMPONENTS = ['spawner', 'draggable', 'dropZone'];
 
 /**
  * Edit mode makes every node draggable and selectable and holds behaviours
@@ -61,6 +70,9 @@ export class GameScene extends Phaser.Scene {
   private state = '';
   private finished = false;
   private mode: RuntimeMode = 'play';
+  /** Nodes with a physics body, kept per tag so colliders can be declared between tags. */
+  private bodiesByTag = new Map<string, Phaser.GameObjects.GameObject[]>();
+  private timers: Phaser.Time.TimerEvent[] = [];
   private selectedId: string | null = null;
   private selectionBox?: Phaser.GameObjects.Graphics;
   private handles: Phaser.GameObjects.Arc[] = [];
@@ -98,6 +110,8 @@ export class GameScene extends Phaser.Scene {
     this.audio = new Map();
     this.state = '';
     this.finished = false;
+    this.bodiesByTag = new Map();
+    this.timers = [];
   }
 
   preload(): void {
@@ -127,6 +141,21 @@ export class GameScene extends Phaser.Scene {
       if (scene.role === 'endcard') {
         for (const node of scene.nodes) this.setVisible(node.id, false);
       }
+    }
+
+    if (this.mode === 'play') {
+      const { width, height } = this.viewport();
+      this.physics.world.setBounds(0, 0, width, height);
+      this.physics.world.gravity.y = this.doc.settings.gravityY;
+
+      if (this.doc.settings.physicsDebug) {
+        this.physics.world.createDebugGraphic();
+        this.physics.world.drawDebug = true;
+      }
+
+      // Declared after every node exists, so a rule can name a tag carried by
+      // something built later in the tree.
+      this.wireCollisions();
     }
 
     this.relayout();
@@ -449,6 +478,12 @@ export class GameScene extends Phaser.Scene {
         tappable = true;
       } else if (component.type === 'audio' && component.autoPlay) {
         this.playSound(component.assetId, component.volume, component.loop);
+      } else if (component.type === 'body' && this.mode === 'play') {
+        // Bodies only exist while playing: gravity pulling a node off screen
+        // mid-edit would fight the author for it.
+        this.attachBody(node, object, component);
+      } else if (component.type === 'timer' && this.mode === 'play') {
+        this.attachTimer(node, component);
       } else if (SKIPPED_COMPONENTS.indexOf(component.type) !== -1) {
         console.warn(`[GameScene] "${component.type}" on ${node.id} is not interpreted yet`);
       }
@@ -524,6 +559,91 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  // --- physics ---------------------------------------------------------------
+
+  private attachBody(
+    node: GameNode,
+    object: Phaser.GameObjects.GameObject,
+    component: Extract<GameComponent, { type: 'body' }>
+  ): void {
+    this.physics.add.existing(object, component.kind === 'static');
+
+    const body = (
+      object as Phaser.GameObjects.GameObject & {
+        body?: Phaser.Physics.Arcade.Body;
+      }
+    ).body;
+
+    if (body && component.kind === 'dynamic') {
+      body.setVelocity(component.velocityX, component.velocityY);
+      body.setBounce(component.bounce, component.bounce);
+      body.setDrag(component.drag, component.drag);
+      body.setCollideWorldBounds(component.collideWorldBounds);
+      if (component.gravityY !== undefined) body.setGravityY(component.gravityY);
+
+      if (component.sizeScale !== 1) {
+        body.setSize(body.width * component.sizeScale, body.height * component.sizeScale, true);
+      }
+
+      // Leaving the world is only observable if Phaser is asked to watch for it.
+      if (node.behaviors.some((behavior) => behavior.event.on === 'leaveBounds')) {
+        body.onWorldBounds = true;
+      }
+    }
+
+    // Indexed by tag so colliders are declared between tags rather than pairs.
+    for (const tag of node.tags) {
+      const group = this.bodiesByTag.get(tag) ?? [];
+      group.push(object);
+      this.bodiesByTag.set(tag, group);
+    }
+  }
+
+  private attachTimer(node: GameNode, component: Extract<GameComponent, { type: 'timer' }>): void {
+    if (!component.autoStart || component.mode !== 'countdown') return;
+
+    this.timers.push(this.time.delayedCall(component.seconds * 1000, () => this.fire({ on: 'timerComplete' }, node.id)));
+  }
+
+  /**
+   * Collisions are declared between tags, so one rule covers however many nodes
+   * carry that tag — including ones that do not exist yet. Overlap passes
+   * through; collide separates the bodies as well.
+   */
+  private wireCollisions(): void {
+    const rules: { nodeId: string; tag: string; kind: 'collide' | 'overlap' }[] = [];
+
+    for (const entry of Array.from(this.live.values())) {
+      for (const behavior of entry.node.behaviors) {
+        if (behavior.event.on === 'collide' || behavior.event.on === 'overlap') {
+          rules.push({
+            nodeId: entry.node.id,
+            tag: behavior.event.tag,
+            kind: behavior.event.on
+          });
+        }
+      }
+    }
+
+    for (const rule of rules) {
+      const source = this.live.get(rule.nodeId)?.object;
+      const others = this.bodiesByTag.get(rule.tag);
+      if (!source || !others?.length) continue;
+
+      const raise = () => this.fire({ on: rule.kind, tag: rule.tag }, rule.nodeId);
+
+      if (rule.kind === 'overlap') this.physics.add.overlap(source, others, raise);
+      else this.physics.add.collider(source, others, raise);
+    }
+
+    this.physics.world.on('worldbounds', (body: Phaser.Physics.Arcade.Body) => {
+      const entry = Array.from(this.live.values()).find(
+        (candidate) => (candidate.object as { body?: unknown }).body === body
+      );
+      if (entry) this.fire({ on: 'leaveBounds' }, entry.node.id);
+    });
+  }
+
   // --- layout ---------------------------------------------------------------
 
   private relayout = (): void => {
@@ -540,11 +660,21 @@ export class GameScene extends Phaser.Scene {
       this.applyTransform(entry);
     }
 
+    // The world is the visible area; a rotated device changes what "off screen"
+    // means for collideWorldBounds and the leaveBounds event.
+    if (this.mode === 'play') {
+      const { width, height } = this.viewport();
+      this.physics.world.setBounds(0, 0, width, height);
+    }
+
     this.drawSelection();
   };
 
   private applyTransform(entry: LiveNode): void {
     const { object, transform } = entry;
+    // Once a body is simulating, the physics engine owns the position. Writing
+    // the authored one back on every resize would teleport a falling node home.
+    const simulating = this.mode === 'play' && !!(object as { body?: unknown }).body;
     const target = object as Phaser.GameObjects.GameObject & Record<string, (...args: never[]) => unknown>;
     const design = { width: this.doc.settings.designWidth, height: this.doc.settings.designHeight };
 
@@ -562,7 +692,7 @@ export class GameScene extends Phaser.Scene {
       setOrigin?: (x: number, y: number) => void;
     };
 
-    setters.setPosition?.(placement.x, placement.y);
+    if (!simulating) setters.setPosition?.(placement.x, placement.y);
     setters.setScale?.(placement.scaleX, placement.scaleY);
     setters.setAngle?.(transform.rotation);
     setters.setAlpha?.(transform.alpha);

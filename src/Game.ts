@@ -15,6 +15,17 @@ export class Game extends Phaser.Game {
         mode: Phaser.Scale.NONE,
         autoCenter: Phaser.Scale.CENTER_BOTH
       },
+      physics: {
+        // Arcade only: axis-aligned bodies, no joints. Every genre the editor
+        // targets is catch, dodge, drag or scroll, and Matter would cost bytes
+        // in a budget that starts ~1.2MB down.
+        default: 'arcade',
+        arcade: {
+          // Per-scene values come from the document; these are the floor.
+          gravity: { x: 0, y: 0 },
+          debug: false
+        }
+      },
       scene: GameScene
     });
   }
