@@ -133,6 +133,8 @@ export class GameScene extends Phaser.Scene {
       this.audio.set(asset.id, element);
     }
 
+    this.seedCounters();
+
     for (const scene of this.doc.scenes) {
       for (const node of scene.nodes) {
         this.buildNode(node, undefined);
@@ -158,6 +160,7 @@ export class GameScene extends Phaser.Scene {
       this.wireCollisions();
     }
 
+    this.refreshTexts();
     this.relayout();
     this.scale.on('resize', this.relayout, this);
 
@@ -522,9 +525,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (node.kind === 'text') {
-      const dictionary = props.text || {};
-      const copy = dictionary[this.doc.defaultLocale] ?? Object.values(dictionary)[0] ?? '';
-      return this.add.text(0, 0, copy, {
+      return this.add.text(0, 0, this.resolveText(node), {
         fontFamily: props.fontFamily || 'sans-serif',
         fontSize: `${props.fontSize || 32}px`,
         color: props.color || '#ffffff',
@@ -557,6 +558,94 @@ export class GameScene extends Phaser.Scene {
       if (this.mode === 'edit') return;
       this.fire({ on: 'tap' }, node.id);
     });
+  }
+
+  // --- text ------------------------------------------------------------------
+
+  /**
+   * Every counter the document mentions, whether or not a component declares
+   * it. A behaviour can create one by adding to it, and until it does the value
+   * is nothing — which would leave "{score}" showing literally to a player, or
+   * a condition comparing against a counter that does not exist. Seeding them
+   * at zero means a counter reads as zero from the first frame.
+   *
+   * Keys nothing mentions stay unknown on purpose: a mistyped "{scroe}" shows
+   * itself rather than quietly rendering a zero the author never meant.
+   */
+  private seedCounters(): void {
+    const note = (key: string) => {
+      if (!this.counters.has(key)) this.counters.set(key, 0);
+    };
+
+    for (const scene of this.doc.scenes) {
+      const walk = (nodes: GameNode[]): void => {
+        for (const node of nodes) {
+          for (const component of node.components) {
+            if (component.type === 'counter') note(component.key);
+          }
+          for (const behavior of node.behaviors) {
+            if (behavior.event.on === 'counterChange') note(behavior.event.key);
+            for (const condition of behavior.conditions) {
+              if (condition.check === 'counter') note(condition.key);
+            }
+            for (const action of behavior.actions) {
+              if (action.do === 'addToCounter') note(action.key);
+            }
+          }
+          walk(node.children);
+        }
+      };
+      walk(scene.nodes);
+    }
+
+    for (const outcome of [this.doc.win, this.doc.lose]) {
+      for (const condition of outcome?.conditions ?? []) {
+        if (condition.check === 'counter') note(condition.key);
+      }
+    }
+  }
+
+  private authoredText(node: GameNode): string {
+    const dictionary = node.props?.text || {};
+    return dictionary[this.doc.defaultLocale] ?? Object.values(dictionary)[0] ?? '';
+  }
+
+  /**
+   * What a text node actually shows. Counters are values with nowhere to appear
+   * on their own, so text is where they surface:
+   *
+   *  - "{score} left" substitutes any counter named in braces, so a value can
+   *    sit inside a sentence;
+   *  - text carrying a counter component and no placeholder shows that
+   *    counter's value, because attaching a counter to a piece of text is the
+   *    gesture that means "display this".
+   */
+  private resolveText(node: GameNode): string {
+    const raw = this.authoredText(node);
+
+    if (/\{[^}]+\}/.test(raw)) {
+      return raw.replace(/\{([^}]+)\}/g, (match, key: string) => {
+        const value = this.counters.get(key.trim());
+        return value === undefined ? match : String(value);
+      });
+    }
+
+    const own = node.components.find((component) => component.type === 'counter');
+    return own ? String(this.counters.get(own.key) ?? 0) : raw;
+  }
+
+  /** Re-reads every text node after a counter moves. */
+  private refreshTexts(): void {
+    for (const entry of Array.from(this.live.values())) {
+      if (entry.node.kind !== 'text') continue;
+
+      const target = entry.object as Phaser.GameObjects.Text;
+      const next = this.resolveText(entry.node);
+      if (target.text !== next) target.setText(next);
+    }
+
+    // A changed value changes the box the handles hang off.
+    if (this.mode === 'edit') this.drawSelection();
   }
 
   // --- physics ---------------------------------------------------------------
@@ -783,6 +872,7 @@ export class GameScene extends Phaser.Scene {
       case 'addToCounter': {
         const next = (this.counters.get(action.key) ?? 0) + action.amount;
         this.counters.set(action.key, next);
+        this.refreshTexts();
         this.fire({ on: 'counterChange', key: action.key });
         this.checkOutcomes();
         return;
