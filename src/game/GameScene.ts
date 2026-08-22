@@ -217,6 +217,16 @@ export class GameScene extends Phaser.Scene {
       });
     }
 
+    // A click landing on nothing clears the selection. Phaser hands the
+    // scene-level handler what the pointer is over, so "nothing" is knowable
+    // without hit-testing by hand — and a handle counts as something, so
+    // grabbing one never deselects what it belongs to.
+    this.input.on('pointerdown', (_pointer: Phaser.Input.Pointer, currentlyOver: Phaser.GameObjects.GameObject[]) => {
+      if (currentlyOver.length) return;
+      this.setSelected(null);
+      this.onEditorAction?.({ type: 'game-editor:selected', nodeId: null });
+    });
+
     this.input.on('dragstart', (pointer: Phaser.Input.Pointer, object: Phaser.GameObjects.GameObject) => {
       const role = object.getData?.('role') as 'scale' | 'rotate' | undefined;
       if (role) this.beginGesture(role, pointer);
