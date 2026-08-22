@@ -16,6 +16,8 @@ interface EditorPayload {
   type?: string;
   doc?: GameDoc;
   mode?: RuntimeMode;
+  /** Which scene the editor is showing; only meaningful while editing. */
+  scene?: 'game' | 'endcard';
   nodeId?: string | null;
 }
 
@@ -63,7 +65,10 @@ export function installEditorBridge(game: Phaser.Game): void {
         // Restarting re-runs init/preload/create, so new assets load and every
         // piece of runtime state (counters, tweens, spawned nodes) is discarded.
         // The mode rides along because init reads it before create builds.
-        scene()?.scene.restart({ mode: payload.mode ?? 'edit' });
+        scene()?.scene.restart({
+          mode: payload.mode ?? 'edit',
+          scene: payload.scene ?? 'game'
+        });
         return;
       }
 

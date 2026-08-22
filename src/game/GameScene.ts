@@ -55,6 +55,8 @@ function toColor(hex: string, fallback = 0x000000): number {
 
 interface LiveNode {
   node: GameNode;
+  /** Which scene the node belongs to — scenes are shown one at a time. */
+  sceneRole: 'game' | 'endcard';
   object: Phaser.GameObjects.GameObject;
   /** Authored transform with the current orientation's patch applied, mutated by tweens. */
   transform: Transform;
@@ -70,6 +72,12 @@ export class GameScene extends Phaser.Scene {
   private state = '';
   private finished = false;
   private mode: RuntimeMode = 'play';
+  /**
+   * The scene on screen. Exactly one at a time: the endcard replaces the game
+   * rather than covering it, which is what it does in a shipped playable and
+   * what an author editing one expects to see.
+   */
+  private visibleScene: 'game' | 'endcard' = 'game';
   /** Nodes with a physics body, kept per tag so colliders can be declared between tags. */
   private bodiesByTag = new Map<string, Phaser.GameObjects.GameObject[]>();
   private timers: Phaser.Time.TimerEvent[] = [];
@@ -102,9 +110,12 @@ export class GameScene extends Phaser.Scene {
    * counter or a spawned node surviving that would make the preview disagree
    * with a fresh load of the same document.
    */
-  init(data?: { mode?: RuntimeMode }): void {
+  init(data?: { mode?: RuntimeMode; scene?: 'game' | 'endcard' }): void {
     this.doc = getDoc();
     if (data?.mode) this.mode = data.mode;
+    // Editing follows the tab the author is on; playing always opens on the
+    // game and reaches the endcard by entering its state.
+    this.visibleScene = this.mode === 'edit' ? data?.scene ?? 'game' : 'game';
     this.live = new Map();
     this.counters = new Map();
     this.audio = new Map();
@@ -137,11 +148,7 @@ export class GameScene extends Phaser.Scene {
 
     for (const scene of this.doc.scenes) {
       for (const node of scene.nodes) {
-        this.buildNode(node, undefined);
-      }
-      // The endcard is a scene like any other; it just starts out of sight.
-      if (scene.role === 'endcard') {
-        for (const node of scene.nodes) this.setVisible(node.id, false);
+        this.buildNode(node, undefined, scene.role);
       }
     }
 
@@ -195,7 +202,7 @@ export class GameScene extends Phaser.Scene {
    */
   private enableEditing(): void {
     for (const entry of Array.from(this.live.values())) {
-      if (entry.node.locked) continue;
+      if (entry.node.locked || entry.sceneRole !== this.visibleScene) continue;
 
       const object = entry.object as Phaser.GameObjects.GameObject & {
         setInteractive: (config?: object) => unknown;
@@ -470,12 +477,18 @@ export class GameScene extends Phaser.Scene {
 
   // --- building -------------------------------------------------------------
 
-  private buildNode(node: GameNode, parent: Phaser.GameObjects.Container | undefined): void {
+  private buildNode(node: GameNode, parent: Phaser.GameObjects.Container | undefined, sceneRole: 'game' | 'endcard'): void {
     const transform = resolveTransform(node.transform, node.overrides, this.orientation);
     const object = this.createObject(node);
     if (!object) return;
 
-    const entry: LiveNode = { node, object, transform: { ...transform }, isRoot: !parent };
+    const entry: LiveNode = {
+      node,
+      sceneRole,
+      object,
+      transform: { ...transform },
+      isRoot: !parent
+    };
     this.live.set(node.id, entry);
 
     if (parent) parent.add(object);
@@ -515,7 +528,7 @@ export class GameScene extends Phaser.Scene {
         console.warn(`[GameScene] ${node.id} is a ${node.kind}; only containers can hold children`);
         break;
       }
-      this.buildNode(child, container);
+      this.buildNode(child, container, sceneRole);
     }
   }
 
@@ -796,7 +809,7 @@ export class GameScene extends Phaser.Scene {
     setters.setAngle?.(transform.rotation);
     setters.setAlpha?.(transform.alpha);
     setters.setDepth?.(transform.depth);
-    setters.setVisible?.(transform.visible);
+    setters.setVisible?.(transform.visible && entry.sceneRole === this.visibleScene);
     // Containers have no origin; everything else is centred by default.
     setters.setOrigin?.(transform.originX, transform.originY);
     void target;
@@ -994,10 +1007,8 @@ export class GameScene extends Phaser.Scene {
       for (const id of state.show) this.setVisible(id, true);
     }
 
-    // The endcard scene is shown by entering the state it is named for.
-    const endcard = this.doc.scenes.find((scene) => scene.role === 'endcard');
-    if (endcard && name === 'endcard') {
-      for (const node of endcard.nodes) this.setVisible(node.id, true);
+    if (name === 'endcard' && this.doc.scenes.some((scene) => scene.role === 'endcard')) {
+      this.showScene('endcard');
     }
 
     this.fire({ on: 'stateEnter', state: name });
@@ -1006,6 +1017,14 @@ export class GameScene extends Phaser.Scene {
       this.finished = true;
       sdk.finish();
     }
+  }
+
+  /** Puts one scene on screen and takes the other off. */
+  private showScene(role: 'game' | 'endcard'): void {
+    if (this.visibleScene === role) return;
+    this.visibleScene = role;
+    for (const entry of Array.from(this.live.values())) this.applyTransform(entry);
+    this.drawSelection();
   }
 
   private setVisible(nodeId: string, visible: boolean): void {
