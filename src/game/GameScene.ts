@@ -19,6 +19,12 @@ const SKIPPED_COMPONENTS = ['body', 'spawner', 'timer', 'draggable', 'dropZone']
 export type RuntimeMode = 'edit' | 'play';
 
 const SELECTION_COLOR = 0xb8ff3c;
+const HANDLE_RADIUS = 7;
+const ROTATE_ARM_LENGTH = 28;
+/** A node can be shrunk but not inverted or vanished by a corner drag. */
+const MIN_SCALE = 0.05;
+
+const round2 = (value: number): number => Math.round(value * 100) / 100;
 
 const EASING: Record<Easing, string> = {
   linear: 'Linear',
@@ -57,6 +63,18 @@ export class GameScene extends Phaser.Scene {
   private mode: RuntimeMode = 'play';
   private selectedId: string | null = null;
   private selectionBox?: Phaser.GameObjects.Graphics;
+  private handles: Phaser.GameObjects.Arc[] = [];
+  /** Live gesture on a scale or rotate handle; absent while nothing is dragging. */
+  private gesture?: {
+    entry: LiveNode;
+    role: 'scale' | 'rotate';
+    center: { x: number; y: number };
+    startDistance: number;
+    startPointerAngle: number;
+    startScaleX: number;
+    startScaleY: number;
+    startRotation: number;
+  };
   /** Reports a drag or a selection back to the editor; unset in a shipped build. */
   private onEditorAction?: (message: Record<string, unknown>) => void;
 
@@ -116,6 +134,7 @@ export class GameScene extends Phaser.Scene {
 
     if (this.mode === 'edit') {
       this.selectionBox = this.add.graphics().setDepth(10_000);
+      this.createHandles();
       this.enableEditing();
       this.drawSelection();
     } else {
@@ -166,9 +185,21 @@ export class GameScene extends Phaser.Scene {
       });
     }
 
+    this.input.on('dragstart', (pointer: Phaser.Input.Pointer, object: Phaser.GameObjects.GameObject) => {
+      const role = object.getData?.('role') as 'scale' | 'rotate' | undefined;
+      if (role) this.beginGesture(role, pointer);
+    });
+
     this.input.on(
       'drag',
-      (_pointer: Phaser.Input.Pointer, object: Phaser.GameObjects.GameObject, dragX: number, dragY: number) => {
+      (pointer: Phaser.Input.Pointer, object: Phaser.GameObjects.GameObject, dragX: number, dragY: number) => {
+        // A handle drives the selected node rather than moving itself; it is put
+        // back where it belongs by drawSelection.
+        if (object.getData?.('role')) {
+          this.updateGesture(pointer);
+          return;
+        }
+
         const moved = object as unknown as { x: number; y: number };
         moved.x = dragX;
         moved.y = dragY;
@@ -177,6 +208,12 @@ export class GameScene extends Phaser.Scene {
     );
 
     this.input.on('dragend', (_pointer: Phaser.Input.Pointer, object: Phaser.GameObjects.GameObject) => {
+      if (object.getData?.('role')) {
+        this.endGesture();
+        this.drawSelection();
+        return;
+      }
+
       const entry = Array.from(this.live.values()).find((candidate) => candidate.object === object);
       if (!entry) return;
 
@@ -206,23 +243,182 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  /**
+   * Four corners for scale and one arm for rotate. They are created once and
+   * moved onto whatever is selected, so a restart does not leave orphans.
+   */
+  private createHandles(): void {
+    const make = (role: 'scale' | 'rotate', corner: number) => {
+      const handle = this.add.circle(0, 0, HANDLE_RADIUS, SELECTION_COLOR).setDepth(10_001).setVisible(false);
+      handle.setData('role', role);
+      handle.setData('corner', corner);
+      handle.setInteractive({ draggable: true, useHandCursor: true });
+      this.input.setDraggable(handle, true);
+      return handle;
+    };
+
+    this.handles = [0, 1, 2, 3].map((corner) => make('scale', corner));
+    this.handles.push(make('rotate', -1));
+  }
+
+  /**
+   * The selected node's box in world space. Taken from the object's own
+   * position and display size rather than its axis-aligned bounds, so the
+   * outline and handles stay on the corners once it is rotated.
+   *
+   * ponytail: assumes a centred origin, which every node has by default. A node
+   * with a shifted origin gets a box offset by the same amount; fix by folding
+   * originX/Y in here if that ever becomes authorable.
+   */
+  private selectionGeometry(
+    entry: LiveNode
+  ): { center: { x: number; y: number }; halfW: number; halfH: number; angle: number } | undefined {
+    const object = entry.object as Phaser.GameObjects.GameObject & {
+      x?: number;
+      y?: number;
+      displayWidth?: number;
+      displayHeight?: number;
+      angle?: number;
+      getBounds?: () => Phaser.Geom.Rectangle;
+    };
+
+    const width = object.displayWidth ?? 0;
+    const height = object.displayHeight ?? 0;
+
+    if (width > 0 && height > 0) {
+      return {
+        center: { x: object.x ?? 0, y: object.y ?? 0 },
+        halfW: width / 2,
+        halfH: height / 2,
+        angle: Phaser.Math.DegToRad(object.angle ?? 0)
+      };
+    }
+
+    // Containers have no display size of their own; their bounds come from
+    // what is inside them, and those are never rotated as a unit here.
+    const bounds = object.getBounds?.();
+    if (!bounds || !bounds.width || !bounds.height) return undefined;
+
+    return {
+      center: { x: bounds.centerX, y: bounds.centerY },
+      halfW: bounds.width / 2,
+      halfH: bounds.height / 2,
+      angle: 0
+    };
+  }
+
+  private cornerPoints(box: {
+    center: { x: number; y: number };
+    halfW: number;
+    halfH: number;
+    angle: number;
+  }): Phaser.Math.Vector2[] {
+    const cos = Math.cos(box.angle);
+    const sin = Math.sin(box.angle);
+
+    return [
+      [-box.halfW, -box.halfH],
+      [box.halfW, -box.halfH],
+      [box.halfW, box.halfH],
+      [-box.halfW, box.halfH]
+    ].map(([x, y]) => new Phaser.Math.Vector2(box.center.x + x * cos - y * sin, box.center.y + x * sin + y * cos));
+  }
+
   private drawSelection(): void {
     const box = this.selectionBox;
     if (!box) return;
 
     box.clear();
     const entry = this.selectedId ? this.live.get(this.selectedId) : undefined;
-    if (!entry) return;
+    const geometry = entry ? this.selectionGeometry(entry) : undefined;
 
-    const bounds = (
-      entry.object as Phaser.GameObjects.GameObject & {
-        getBounds?: () => Phaser.Geom.Rectangle;
-      }
-    ).getBounds?.();
-    if (!bounds || !bounds.width || !bounds.height) return;
+    if (!geometry) {
+      for (const handle of this.handles) handle.setVisible(false);
+      return;
+    }
 
+    const corners = this.cornerPoints(geometry);
     box.lineStyle(2, SELECTION_COLOR, 0.9);
-    box.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+    box.strokePoints(corners, true);
+
+    // The rotate arm sticks out past the top edge, away from the box.
+    const topMid = corners[0].clone().add(corners[1]).scale(0.5);
+    const arm = new Phaser.Math.Vector2(Math.sin(geometry.angle), -Math.cos(geometry.angle)).scale(ROTATE_ARM_LENGTH);
+    const rotatePoint = topMid.clone().add(arm);
+
+    box.lineBetween(topMid.x, topMid.y, rotatePoint.x, rotatePoint.y);
+
+    this.handles.forEach((handle) => {
+      const corner = handle.getData('corner') as number;
+      const point = corner >= 0 ? corners[corner] : rotatePoint;
+      handle.setPosition(point.x, point.y).setVisible(true);
+    });
+  }
+
+  /** Begins a scale or rotate gesture, capturing what it measures against. */
+  private beginGesture(role: 'scale' | 'rotate', pointer: Phaser.Input.Pointer): void {
+    const entry = this.selectedId ? this.live.get(this.selectedId) : undefined;
+    const geometry = entry ? this.selectionGeometry(entry) : undefined;
+    if (!entry || !geometry) return;
+
+    this.gesture = {
+      entry,
+      role,
+      center: geometry.center,
+      startDistance: Phaser.Math.Distance.BetweenPoints(pointer, geometry.center) || 1,
+      startPointerAngle: Phaser.Math.Angle.BetweenPoints(geometry.center, pointer),
+      startScaleX: entry.transform.scaleX,
+      startScaleY: entry.transform.scaleY,
+      startRotation: entry.transform.rotation
+    };
+  }
+
+  /**
+   * Scale is applied as a ratio of the authored value, so no inverse of the
+   * layout maths is needed: dragging a corner to twice the distance doubles the
+   * authored scale, whatever the device happens to be showing it at.
+   */
+  private updateGesture(pointer: Phaser.Input.Pointer): void {
+    const gesture = this.gesture;
+    if (!gesture) return;
+
+    if (gesture.role === 'scale') {
+      const ratio = Phaser.Math.Distance.BetweenPoints(pointer, gesture.center) / gesture.startDistance;
+      const clamped = Math.max(MIN_SCALE, ratio);
+      gesture.entry.transform = {
+        ...gesture.entry.transform,
+        scaleX: round2(gesture.startScaleX * clamped),
+        scaleY: round2(gesture.startScaleY * clamped)
+      };
+    } else {
+      const delta = Phaser.Math.Angle.BetweenPoints(gesture.center, pointer) - gesture.startPointerAngle;
+      gesture.entry.transform = {
+        ...gesture.entry.transform,
+        rotation: Math.round(gesture.startRotation + Phaser.Math.RadToDeg(delta))
+      };
+    }
+
+    this.applyTransform(gesture.entry);
+    this.drawSelection();
+  }
+
+  private endGesture(): void {
+    const gesture = this.gesture;
+    this.gesture = undefined;
+    if (!gesture) return;
+
+    const { scaleX, scaleY, rotation } = gesture.entry.transform;
+    if (scaleX === gesture.startScaleX && scaleY === gesture.startScaleY && rotation === gesture.startRotation) {
+      return;
+    }
+
+    this.onEditorAction?.({
+      type: 'game-editor:transformed',
+      nodeId: gesture.entry.node.id,
+      scaleX,
+      scaleY,
+      rotation
+    });
   }
 
   private viewport(): Size {
