@@ -1,7 +1,7 @@
 import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { getDoc } from './doc-source';
-import { orientationOf, resolveTransform, rootPlacement, type Size } from './layout';
+import { orientationOf, resolveTransform, rootOffsetFromScreen, rootPlacement, type Size } from './layout';
 import type { Behavior, Condition, Easing, GameAction, GameDoc, GameNode, Orientation, Outcome, Transform } from './types';
 
 // ponytail: this pass interprets rendering, layout, tap and the non-physics
@@ -10,6 +10,15 @@ import type { Behavior, Condition, Easing, GameAction, GameDoc, GameNode, Orient
 // until the physics pass; they are listed in SKIPPED_COMPONENTS so an author is
 // warned rather than left wondering why nothing happened.
 const SKIPPED_COMPONENTS = ['body', 'spawner', 'timer', 'draggable', 'dropZone'];
+
+/**
+ * Edit mode makes every node draggable and selectable and holds behaviours
+ * back, so tapping a CTA to move it does not also fire it. Play mode is the
+ * playable exactly as it ships. An exported build only ever runs 'play'.
+ */
+export type RuntimeMode = 'edit' | 'play';
+
+const SELECTION_COLOR = 0xb8ff3c;
 
 const EASING: Record<Easing, string> = {
   linear: 'Linear',
@@ -45,6 +54,11 @@ export class GameScene extends Phaser.Scene {
   private orientation: Orientation = 'portrait';
   private state = '';
   private finished = false;
+  private mode: RuntimeMode = 'play';
+  private selectedId: string | null = null;
+  private selectionBox?: Phaser.GameObjects.Graphics;
+  /** Reports a drag or a selection back to the editor; unset in a shipped build. */
+  private onEditorAction?: (message: Record<string, unknown>) => void;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -58,8 +72,9 @@ export class GameScene extends Phaser.Scene {
    * counter or a spawned node surviving that would make the preview disagree
    * with a fresh load of the same document.
    */
-  init(): void {
+  init(data?: { mode?: RuntimeMode }): void {
     this.doc = getDoc();
+    if (data?.mode) this.mode = data.mode;
     this.live = new Map();
     this.counters = new Map();
     this.audio = new Map();
@@ -99,8 +114,112 @@ export class GameScene extends Phaser.Scene {
     this.relayout();
     this.scale.on('resize', this.relayout, this);
 
-    this.fire({ on: 'start' });
+    if (this.mode === 'edit') {
+      this.selectionBox = this.add.graphics().setDepth(10_000);
+      this.enableEditing();
+      this.drawSelection();
+    } else {
+      this.fire({ on: 'start' });
+    }
+
     sdk.start();
+  }
+
+  // --- editing --------------------------------------------------------------
+
+  /** Called by the bridge when the editor switches mode or changes selection. */
+  setEditorHooks(report: (message: Record<string, unknown>) => void): void {
+    this.onEditorAction = report;
+  }
+
+  setSelected(nodeId: string | null): void {
+    this.selectedId = nodeId;
+    this.drawSelection();
+  }
+
+  /**
+   * Every node becomes draggable. The object moves locally for the duration of
+   * the gesture — the editor is only told on release, so a drag is one document
+   * change and one undo step rather than one per pointer move.
+   */
+  private enableEditing(): void {
+    for (const entry of Array.from(this.live.values())) {
+      if (entry.node.locked) continue;
+
+      const object = entry.object as Phaser.GameObjects.GameObject & {
+        setInteractive: (config?: object) => unknown;
+        input?: unknown;
+      };
+
+      // Containers have no size of their own until something is inside them,
+      // so Phaser cannot derive a hit area; skip rather than throw.
+      try {
+        object.setInteractive({ draggable: true, useHandCursor: true });
+      } catch {
+        continue;
+      }
+      this.input.setDraggable(object as Phaser.GameObjects.GameObject, true);
+
+      object.on('pointerdown', () => {
+        this.setSelected(entry.node.id);
+        this.onEditorAction?.({ type: 'game-editor:selected', nodeId: entry.node.id });
+      });
+    }
+
+    this.input.on(
+      'drag',
+      (_pointer: Phaser.Input.Pointer, object: Phaser.GameObjects.GameObject, dragX: number, dragY: number) => {
+        const moved = object as unknown as { x: number; y: number };
+        moved.x = dragX;
+        moved.y = dragY;
+        this.drawSelection();
+      }
+    );
+
+    this.input.on('dragend', (_pointer: Phaser.Input.Pointer, object: Phaser.GameObjects.GameObject) => {
+      const entry = Array.from(this.live.values()).find((candidate) => candidate.object === object);
+      if (!entry) return;
+
+      const placed = object as unknown as { x: number; y: number };
+      const design = {
+        width: this.doc.settings.designWidth,
+        height: this.doc.settings.designHeight
+      };
+
+      // Report the authored offset, not the screen position: a document holds
+      // values that mean the same thing on every device.
+      const offset = entry.isRoot
+        ? rootOffsetFromScreen(placed, entry.transform, design, this.viewport())
+        : { x: placed.x, y: placed.y };
+
+      entry.transform = { ...entry.transform, x: offset.x, y: offset.y };
+      this.onEditorAction?.({
+        type: 'game-editor:moved',
+        nodeId: entry.node.id,
+        x: Math.round(offset.x),
+        y: Math.round(offset.y)
+      });
+      this.drawSelection();
+    });
+  }
+
+  private drawSelection(): void {
+    const box = this.selectionBox;
+    if (!box) return;
+
+    box.clear();
+    const entry = this.selectedId ? this.live.get(this.selectedId) : undefined;
+    if (!entry) return;
+
+    const bounds = (
+      entry.object as Phaser.GameObjects.GameObject & {
+        getBounds?: () => Phaser.Geom.Rectangle;
+      }
+    ).getBounds?.();
+    if (!bounds || !bounds.width || !bounds.height) return;
+
+    box.lineStyle(2, SELECTION_COLOR, 0.9);
+    box.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
   }
 
   private viewport(): Size {
@@ -190,7 +309,10 @@ export class GameScene extends Phaser.Scene {
       object.setInteractive({ useHandCursor: true });
     }
 
-    object.on('pointerdown', () => this.fire({ on: 'tap' }, node.id));
+    object.on('pointerdown', () => {
+      if (this.mode === 'edit') return;
+      this.fire({ on: 'tap' }, node.id);
+    });
   }
 
   // --- layout ---------------------------------------------------------------
@@ -208,6 +330,8 @@ export class GameScene extends Phaser.Scene {
       }
       this.applyTransform(entry);
     }
+
+    this.drawSelection();
   };
 
   private applyTransform(entry: LiveNode): void {

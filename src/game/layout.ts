@@ -79,3 +79,24 @@ export function rootPlacement(transform: Transform, design: Size, view: Size): P
     scaleY: transform.scaleY * sy
   };
 }
+
+/**
+ * The inverse of rootPlacement: given where a root node now sits on screen,
+ * the authored offset that would put it there. Dragging in the preview reads
+ * back through this, so a drag writes the same kind of value the inspector
+ * does rather than a screen coordinate that means nothing on another device.
+ */
+export function rootOffsetFromScreen(
+  screen: { x: number; y: number },
+  transform: Transform,
+  design: Size,
+  view: Size
+): { x: number; y: number } {
+  const { sx, sy } = layoutScale(transform.fit, design, view);
+  const origin = anchorPoint(transform.anchor, view);
+
+  return {
+    x: sx ? (screen.x - origin.x) / sx : 0,
+    y: sy ? (screen.y - origin.y) / sy : 0
+  };
+}
