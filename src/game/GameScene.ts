@@ -15,10 +15,12 @@ import type {
   Transform
 } from './types';
 
-// ponytail: spawners, draggable and drop zones are parsed and ignored for now.
-// They are listed in SKIPPED_COMPONENTS so an author is warned rather than left
-// wondering why nothing happened.
-const SKIPPED_COMPONENTS = ['spawner', 'draggable', 'dropZone'];
+// Every component type is interpreted; the list is kept so a type added to the
+// schema before the runtime catches up still warns rather than doing nothing.
+const SKIPPED_COMPONENTS: string[] = [];
+
+/** Ids for nodes a spawner clones, kept apart from anything an author typed. */
+let spawnCounter = 0;
 
 /**
  * Edit mode makes every node draggable and selectable and holds behaviours
@@ -81,6 +83,10 @@ export class GameScene extends Phaser.Scene {
   /** Nodes with a physics body, kept per tag so colliders can be declared between tags. */
   private bodiesByTag = new Map<string, Phaser.GameObjects.GameObject[]>();
   private timers: Phaser.Time.TimerEvent[] = [];
+  private dropZones: { entry: LiveNode; accepts: string[]; snap: boolean }[] = [];
+  /** Nodes a spawner uses as prototypes; hidden while playing. */
+  private prototypes = new Set<string>();
+  private aliveBySpawner = new Map<string, number>();
   private selectedId: string | null = null;
   private selectionBox?: Phaser.GameObjects.Graphics;
   private handles: Phaser.GameObjects.Arc[] = [];
@@ -123,6 +129,9 @@ export class GameScene extends Phaser.Scene {
     this.finished = false;
     this.bodiesByTag = new Map();
     this.timers = [];
+    this.dropZones = [];
+    this.prototypes = new Set();
+    this.aliveBySpawner = new Map();
   }
 
   preload(): void {
@@ -510,6 +519,16 @@ export class GameScene extends Phaser.Scene {
         this.attachBody(node, object, component);
       } else if (component.type === 'timer' && this.mode === 'play') {
         this.attachTimer(node, component);
+      } else if (component.type === 'spawner' && this.mode === 'play') {
+        this.attachSpawner(entry, component);
+      } else if (component.type === 'draggable' && this.mode === 'play') {
+        this.attachDraggable(entry, component);
+      } else if (component.type === 'dropZone' && this.mode === 'play') {
+        this.dropZones.push({
+          entry,
+          accepts: component.accepts,
+          snap: component.snap
+        });
       } else if (SKIPPED_COMPONENTS.indexOf(component.type) !== -1) {
         console.warn(`[GameScene] "${component.type}" on ${node.id} is not interpreted yet`);
       }
@@ -717,36 +736,164 @@ export class GameScene extends Phaser.Scene {
     this.timers.push(this.time.delayedCall(component.seconds * 1000, () => this.fire({ on: 'timerComplete' }, node.id)));
   }
 
+  // --- spawning ----------------------------------------------------------------
+
+  /**
+   * A spawner clones prototypes on a timer. The prototypes are hidden while
+   * playing: a node named as a spawner's source is a template rather than part
+   * of the scene, and leaving it on screen puts a motionless copy in every game.
+   */
+  private attachSpawner(spawner: LiveNode, component: Extract<GameComponent, { type: 'spawner' }>): void {
+    for (const sourceId of component.sources) {
+      this.prototypes.add(sourceId);
+      const prototype = this.live.get(sourceId);
+      if (prototype) this.applyTransform(prototype);
+    }
+
+    if (!component.autoStart || component.rate <= 0 || !component.sources.length) return;
+
+    this.timers.push(
+      this.time.addEvent({
+        delay: 1000 / component.rate,
+        loop: true,
+        callback: () => this.spawnOne(spawner, component)
+      })
+    );
+  }
+
+  private spawnOne(spawner: LiveNode, component: Extract<GameComponent, { type: 'spawner' }>): void {
+    const alive = this.aliveBySpawner.get(spawner.node.id) ?? 0;
+    if (component.maxAlive > 0 && alive >= component.maxAlive) return;
+
+    const sourceId = component.sources[Math.floor(Math.random() * component.sources.length)];
+    const prototype = this.live.get(sourceId);
+    if (!prototype) return;
+
+    const spread = (size: number) => (size ? (Math.random() - 0.5) * size : 0);
+    const clone = this.cloneNode(prototype.node);
+    clone.transform = {
+      ...clone.transform,
+      x: spawner.transform.x + spread(component.area.width),
+      y: spawner.transform.y + spread(component.area.height)
+    };
+
+    this.buildNode(clone, undefined, spawner.sceneRole);
+    const spawned = this.live.get(clone.id);
+    if (!spawned) return;
+
+    this.aliveBySpawner.set(spawner.node.id, alive + 1);
+    this.wireCollisionsFor(spawned);
+    this.fire({ on: 'spawn' }, clone.id);
+
+    const retire = () => {
+      if (!this.live.has(clone.id)) return;
+      spawned.object.destroy();
+      this.live.delete(clone.id);
+      this.aliveBySpawner.set(spawner.node.id, Math.max(0, (this.aliveBySpawner.get(spawner.node.id) ?? 1) - 1));
+    };
+
+    if (component.lifetime > 0) {
+      this.timers.push(this.time.delayedCall(component.lifetime * 1000, retire));
+    }
+  }
+
+  /** A deep copy with fresh ids, so clones never collide with their prototype. */
+  private cloneNode(node: GameNode): GameNode {
+    spawnCounter += 1;
+    return {
+      ...node,
+      id: `${node.id}__spawn${spawnCounter}`,
+      transform: { ...node.transform },
+      components: node.components.map((component) => ({ ...component })),
+      behaviors: node.behaviors.map((behavior) => ({ ...behavior })),
+      children: node.children.map((child) => this.cloneNode(child))
+    };
+  }
+
+  // --- dragging ----------------------------------------------------------------
+
+  private attachDraggable(entry: LiveNode, component: Extract<GameComponent, { type: 'draggable' }>): void {
+    const object = entry.object as Phaser.GameObjects.GameObject & {
+      setInteractive: (config?: object) => unknown;
+      x?: number;
+      y?: number;
+    };
+
+    try {
+      object.setInteractive({ draggable: true, useHandCursor: true });
+    } catch {
+      return;
+    }
+    this.input.setDraggable(object as Phaser.GameObjects.GameObject, true);
+
+    const home = { x: object.x ?? 0, y: object.y ?? 0 };
+
+    object.on('dragstart', () => {
+      home.x = object.x ?? 0;
+      home.y = object.y ?? 0;
+      if (component.bringToTop) this.children.bringToTop(entry.object);
+      this.fire({ on: 'dragStart' }, entry.node.id);
+    });
+
+    object.on('drag', (_pointer: Phaser.Input.Pointer, dragX: number, dragY: number) => {
+      if (component.axis !== 'y') object.x = dragX;
+      if (component.axis !== 'x') object.y = dragY;
+    });
+
+    object.on('dragend', () => {
+      const zone = this.dropZoneUnder(entry);
+      if (zone) {
+        const correct = entry.node.tags.some((tag) => zone.accepts.includes(tag));
+        if (correct && zone.snap) {
+          const target = zone.entry.object as unknown as { x: number; y: number };
+          object.x = target.x;
+          object.y = target.y;
+        }
+        // Both sides hear it: the piece that moved and the slot that received.
+        this.fire({ on: 'drop', correct }, entry.node.id);
+        this.fire({ on: 'drop', correct }, zone.entry.node.id);
+        if (correct) return;
+      }
+
+      if (component.returnOnRelease) {
+        this.tweens.add({
+          targets: entry.object,
+          x: home.x,
+          y: home.y,
+          duration: 200,
+          ease: 'Quad.easeOut'
+        });
+      }
+
+      this.fire({ on: 'dragEnd' }, entry.node.id);
+    });
+  }
+
+  private dropZoneUnder(entry: LiveNode) {
+    const bounds = (
+      entry.object as Phaser.GameObjects.GameObject & {
+        getBounds?: () => Phaser.Geom.Rectangle;
+      }
+    ).getBounds?.();
+    if (!bounds) return undefined;
+
+    return this.dropZones.find((zone) => {
+      const area = (
+        zone.entry.object as Phaser.GameObjects.GameObject & {
+          getBounds?: () => Phaser.Geom.Rectangle;
+        }
+      ).getBounds?.();
+      return area ? Phaser.Geom.Intersects.RectangleToRectangle(bounds, area) : false;
+    });
+  }
+
   /**
    * Collisions are declared between tags, so one rule covers however many nodes
    * carry that tag — including ones that do not exist yet. Overlap passes
    * through; collide separates the bodies as well.
    */
   private wireCollisions(): void {
-    const rules: { nodeId: string; tag: string; kind: 'collide' | 'overlap' }[] = [];
-
-    for (const entry of Array.from(this.live.values())) {
-      for (const behavior of entry.node.behaviors) {
-        if (behavior.event.on === 'collide' || behavior.event.on === 'overlap') {
-          rules.push({
-            nodeId: entry.node.id,
-            tag: behavior.event.tag,
-            kind: behavior.event.on
-          });
-        }
-      }
-    }
-
-    for (const rule of rules) {
-      const source = this.live.get(rule.nodeId)?.object;
-      const others = this.bodiesByTag.get(rule.tag);
-      if (!source || !others?.length) continue;
-
-      const raise = () => this.fire({ on: rule.kind, tag: rule.tag }, rule.nodeId);
-
-      if (rule.kind === 'overlap') this.physics.add.overlap(source, others, raise);
-      else this.physics.add.collider(source, others, raise);
-    }
+    for (const entry of Array.from(this.live.values())) this.wireCollisionsFor(entry);
 
     this.physics.world.on('worldbounds', (body: Phaser.Physics.Arcade.Body) => {
       const entry = Array.from(this.live.values()).find(
@@ -754,6 +901,31 @@ export class GameScene extends Phaser.Scene {
       );
       if (entry) this.fire({ on: 'leaveBounds' }, entry.node.id);
     });
+  }
+
+  /**
+   * Declares one node's collision rules. Each is against the ARRAY of bodies
+   * carrying a tag, not the objects in it right now — Arcade re-reads the array
+   * every step, so a node spawned later joins the rule simply by being pushed
+   * into it. The array is created even when empty for the same reason: a rule
+   * naming a tag nothing carries yet still has to be live when something does.
+   */
+  private wireCollisionsFor(entry: LiveNode): void {
+    for (const behavior of entry.node.behaviors) {
+      const event = behavior.event;
+      if (event.on !== 'collide' && event.on !== 'overlap') continue;
+
+      let others = this.bodiesByTag.get(event.tag);
+      if (!others) {
+        others = [];
+        this.bodiesByTag.set(event.tag, others);
+      }
+
+      const raise = () => this.fire({ on: event.on as 'collide' | 'overlap', tag: event.tag }, entry.node.id);
+
+      if (event.on === 'overlap') this.physics.add.overlap(entry.object, others, raise);
+      else this.physics.add.collider(entry.object, others, raise);
+    }
   }
 
   // --- layout ---------------------------------------------------------------
@@ -809,7 +981,11 @@ export class GameScene extends Phaser.Scene {
     setters.setAngle?.(transform.rotation);
     setters.setAlpha?.(transform.alpha);
     setters.setDepth?.(transform.depth);
-    setters.setVisible?.(transform.visible && entry.sceneRole === this.visibleScene);
+    setters.setVisible?.(
+      transform.visible &&
+        entry.sceneRole === this.visibleScene &&
+        !(this.mode === 'play' && this.prototypes.has(entry.node.id))
+    );
     // Containers have no origin; everything else is centred by default.
     setters.setOrigin?.(transform.originX, transform.originY);
     void target;
