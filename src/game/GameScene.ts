@@ -897,6 +897,11 @@ export class GameScene extends Phaser.Scene {
    *    counter's value, because attaching a counter to a piece of text is the
    *    gesture that means "display this".
    */
+  /** Whether this node's text is derived from a counter, and so worth redrawing. */
+  private bindsCounter(node: GameNode): boolean {
+    return /\{[^}]+\}/.test(this.authoredText(node)) || node.components.some((component) => component.type === 'counter');
+  }
+
   private resolveText(node: GameNode): string {
     const raw = this.authoredText(node);
 
@@ -915,6 +920,12 @@ export class GameScene extends Phaser.Scene {
   private refreshTexts(): void {
     for (const entry of Array.from(this.live.values())) {
       if (entry.node.kind !== 'text') continue;
+      // Only text that is a view of a counter. This runs on every counter
+      // write, and it used to rewrite every text node in the scene from the
+      // document — so a script that wrote to one had its work undone by the
+      // next add(), which is how a noughts and crosses board kept showing the
+      // letter it was authored with instead of the move that was played.
+      if (!this.bindsCounter(entry.node)) continue;
 
       const target = entry.object as Phaser.GameObjects.Text;
       const next = this.resolveText(entry.node);
