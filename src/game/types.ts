@@ -129,6 +129,9 @@ export type Condition =
 
 export type Easing = 'linear' | 'quadIn' | 'quadOut' | 'quadInOut' | 'backOut' | 'bounceOut' | 'elasticOut';
 
+/** Names the other participant in the event that fired. */
+export const OTHER_TARGET = '@other';
+
 export type GameAction =
   | {
       do: 'tween';

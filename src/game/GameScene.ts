@@ -2,6 +2,7 @@ import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { getDoc } from './doc-source';
 import { orientationOf, resolveTransform, rootOffsetFromScreen, rootPlacement, type Size } from './layout';
+import { OTHER_TARGET } from './types';
 import type {
   Behavior,
   Condition,
@@ -876,9 +877,10 @@ export class GameScene extends Phaser.Scene {
           this.input.setDraggable(entry.object as Phaser.GameObjects.GameObject, false);
           zone.filledBy = entry.node.id;
         }
-        // Both sides hear it: the piece that moved and the slot that received.
-        this.fire({ on: 'drop', correct }, entry.node.id);
-        this.fire({ on: 'drop', correct }, zone.entry.node.id);
+        // Both sides hear it, each told who the other was: the piece that moved
+        // and the slot that received it.
+        this.fire({ on: 'drop', correct }, entry.node.id, zone.entry.node.id);
+        this.fire({ on: 'drop', correct }, zone.entry.node.id, entry.node.id);
         // A held wrong piece stays where it was put, so it is never sprung back.
         if (held) return;
       }
@@ -950,7 +952,12 @@ export class GameScene extends Phaser.Scene {
         this.bodiesByTag.set(event.tag, others);
       }
 
-      const raise = () => this.fire({ on: event.on as 'collide' | 'overlap', tag: event.tag }, entry.node.id);
+      // Phaser hands the callback both bodies; the second is what was hit, and
+      // naming it is what lets a rule act on the thing rather than on itself.
+      const raise = (_self: unknown, hit: unknown) => {
+        const other = Array.from(this.live.values()).find((candidate) => (candidate.object as unknown) === hit);
+        this.fire({ on: event.on as 'collide' | 'overlap', tag: event.tag }, entry.node.id, other?.node.id);
+      };
 
       if (event.on === 'overlap') this.physics.add.overlap(entry.object, others, raise);
       else this.physics.add.collider(entry.object, others, raise);
@@ -1023,14 +1030,14 @@ export class GameScene extends Phaser.Scene {
   // --- behaviours -----------------------------------------------------------
 
   /** Run every behaviour whose event matches, optionally limited to one node. */
-  private fire(event: Behavior['event'], nodeId?: string): void {
+  private fire(event: Behavior['event'], nodeId?: string, subjectId?: string): void {
     for (const entry of Array.from(this.live.values())) {
       if (nodeId && entry.node.id !== nodeId) continue;
 
       for (const behavior of entry.node.behaviors) {
         if (!this.eventMatches(behavior.event, event)) continue;
         if (!behavior.conditions.every((condition) => this.conditionHolds(condition))) continue;
-        this.runActions(behavior, entry);
+        this.runActions(behavior, entry, subjectId);
       }
     }
   }
@@ -1089,7 +1096,7 @@ export class GameScene extends Phaser.Scene {
    * Sequential by default: each action starts after the ones before it, and a
    * `wait` pushes everything after it out. Parallel behaviours start together.
    */
-  private runActions(behavior: Behavior, entry: LiveNode): void {
+  private runActions(behavior: Behavior, entry: LiveNode, subjectId?: string): void {
     let delay = 0;
 
     for (const action of behavior.actions) {
@@ -1099,21 +1106,21 @@ export class GameScene extends Phaser.Scene {
       }
 
       if (delay <= 0) {
-        this.runAction(action, entry);
+        this.runAction(action, entry, subjectId);
       } else {
-        this.time.delayedCall(delay, () => this.runAction(action, entry));
+        this.time.delayedCall(delay, () => this.runAction(action, entry, subjectId));
       }
     }
   }
 
-  private runAction(action: GameAction, source: LiveNode): void {
+  private runAction(action: GameAction, source: LiveNode, subjectId?: string): void {
     switch (action.do) {
       case 'openCta':
         sdk.install();
         return;
 
       case 'resetPosition': {
-        const target = this.resolve(action.target, source);
+        const target = this.resolve(action.target, source, subjectId);
         if (target) this.resetNode(target);
         return;
       }
@@ -1143,7 +1150,7 @@ export class GameScene extends Phaser.Scene {
 
       case 'show':
       case 'hide': {
-        const target = this.resolve(action.target, source);
+        const target = this.resolve(action.target, source, subjectId);
         if (target) {
           target.transform.visible = action.do === 'show';
           this.applyTransform(target);
@@ -1152,7 +1159,7 @@ export class GameScene extends Phaser.Scene {
       }
 
       case 'destroy': {
-        const target = this.resolve(action.target, source);
+        const target = this.resolve(action.target, source, subjectId);
         if (target) {
           target.object.destroy();
           this.live.delete(target.node.id);
@@ -1161,7 +1168,7 @@ export class GameScene extends Phaser.Scene {
       }
 
       case 'setProperty': {
-        const target = this.resolve(action.target, source);
+        const target = this.resolve(action.target, source, subjectId);
         if (target && action.key in target.transform) {
           (target.transform as unknown as Record<string, unknown>)[action.key] = action.value;
           this.applyTransform(target);
@@ -1170,7 +1177,7 @@ export class GameScene extends Phaser.Scene {
       }
 
       case 'shake': {
-        const target = this.resolve(action.target, source);
+        const target = this.resolve(action.target, source, subjectId);
         if (!target) return;
         const object = target.object as unknown as { x?: number };
         const from = object.x ?? 0;
@@ -1186,7 +1193,7 @@ export class GameScene extends Phaser.Scene {
       }
 
       case 'tween': {
-        const target = this.resolve(action.target, source);
+        const target = this.resolve(action.target, source, subjectId);
         if (!target) return;
         this.runTween(target, action);
         return;
@@ -1260,8 +1267,11 @@ export class GameScene extends Phaser.Scene {
     this.drawSelection();
   }
 
-  private resolve(nodeId: string | undefined, fallback: LiveNode): LiveNode | undefined {
+  private resolve(nodeId: string | undefined, fallback: LiveNode, subjectId?: string): LiveNode | undefined {
     if (!nodeId) return fallback;
+    if (nodeId === OTHER_TARGET) {
+      return subjectId ? this.live.get(subjectId) : undefined;
+    }
     return this.live.get(nodeId);
   }
 
