@@ -654,6 +654,16 @@ export class GameScene extends Phaser.Scene {
     const object = this.createObject(node);
     if (!object) return;
 
+    // What the author called it, and what they tagged it — the two things a
+    // script asks a node about itself. Phaser has a name field and leaves it
+    // empty, so find('Text-B').name read as blank; tags were not there at all,
+    // which is awkward when tags are what drop zones match on.
+    object.name = node.name;
+    Object.defineProperty(object, 'tags', {
+      configurable: true,
+      get: () => [...node.tags]
+    });
+
     const entry: LiveNode = {
       node,
       sceneId,
