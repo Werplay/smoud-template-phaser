@@ -88,6 +88,7 @@ export class GameScene extends Phaser.Scene {
     accepts: string[];
     snap: boolean;
     lockOnCorrect: boolean;
+    allowIncorrect: boolean;
     filled: boolean;
   }[] = [];
   /** Nodes a spawner uses as prototypes; hidden while playing. */
@@ -535,6 +536,7 @@ export class GameScene extends Phaser.Scene {
           accepts: component.accepts,
           snap: component.snap,
           lockOnCorrect: component.lockOnCorrect,
+          allowIncorrect: component.allowIncorrect,
           filled: false
         });
       } else if (SKIPPED_COMPONENTS.indexOf(component.type) !== -1) {
@@ -852,7 +854,11 @@ export class GameScene extends Phaser.Scene {
       const zone = this.dropZoneUnder(entry);
       if (zone) {
         const correct = entry.node.tags.some((tag) => zone.accepts.includes(tag));
-        if (correct && zone.snap) {
+        // A wrong piece is held only where the zone allows it; it still counts
+        // as a wrong drop, so nothing scoring correct ones is affected.
+        const held = correct || zone.allowIncorrect;
+
+        if (held && zone.snap) {
           const target = zone.entry.object as unknown as { x: number; y: number };
           object.x = target.x;
           object.y = target.y;
@@ -866,7 +872,8 @@ export class GameScene extends Phaser.Scene {
         // Both sides hear it: the piece that moved and the slot that received.
         this.fire({ on: 'drop', correct }, entry.node.id);
         this.fire({ on: 'drop', correct }, zone.entry.node.id);
-        if (correct) return;
+        // A held wrong piece stays where it was put, so it is never sprung back.
+        if (held) return;
       }
 
       if (component.returnOnRelease) {
