@@ -67,6 +67,12 @@ type ScriptHandler = (payload?: unknown, event?: unknown) => void;
 
 interface LiveNode {
   node: GameNode;
+  /**
+   * The sound this node owns, when it has an audio component. This is what a
+   * script gets from find(), so `find('music').play()` is a real call on a real
+   * Phaser sound rather than a method an empty container does not have.
+   */
+  sound?: Phaser.Sound.BaseSound;
   /** Which scene the node belongs to — scenes are shown one at a time. */
   sceneId: string;
   object: Phaser.GameObjects.GameObject;
@@ -79,7 +85,6 @@ export class GameScene extends Phaser.Scene {
   private doc: GameDoc = getDoc();
   private live = new Map<string, LiveNode>();
   private counters = new Map<string, number>();
-  private audio = new Map<string, HTMLAudioElement>();
   private orientation: Orientation = 'portrait';
   private state = '';
   private finished = false;
@@ -129,8 +134,8 @@ export class GameScene extends Phaser.Scene {
   private scriptHandlers = new Map<string, Map<string, ScriptHandler[]>>();
   /** One report per script: a throw inside update() would otherwise repeat 60 times a second. */
   private scriptErrors = new Set<string>();
-  /** Sounds the browser refused for want of a gesture, waiting for the first touch. */
-  private blockedSounds: HTMLAudioElement[] = [];
+  /** Blob URLs made for embedded audio, released when the run ends. */
+  private blobUrls: string[] = [];
 
   constructor() {
     super({ key: 'GameScene' });
@@ -157,12 +162,11 @@ export class GameScene extends Phaser.Scene {
     this.visibleScene = (requested ?? start)?.id ?? '';
     this.live = new Map();
     this.counters = new Map();
-    // Stopped, not just dropped: an element that is playing goes on playing
-    // with nothing pointing at it, so every restart used to stack another copy
-    // of the music on top of the last.
-    this.stopAudio();
-    this.audio = new Map();
-    this.blockedSounds = [];
+    // Removed, not just stopped: the sound manager belongs to the game rather
+    // than the scene, so it outlives a restart. Stopping left the instance
+    // behind, and a scene rebuilt fifty times had fifty silent sounds in it —
+    // and any script reading scene.sound.sounds saw all of them.
+    this.sound.removeAll();
     this.state = '';
     this.finished = false;
     this.outcomeLatched = { win: false, lose: false };
@@ -178,19 +182,18 @@ export class GameScene extends Phaser.Scene {
     // either way the loader has the texture ready before create() places it.
     for (const asset of this.doc.assets) {
       if (asset.kind === 'image') this.load.image(asset.id, asset.url);
+      // Through Phaser rather than an Audio element, so a sound is an object a
+      // script can hold: play, stop, setVolume, isPlaying. Phaser also waits
+      // out the browser's gesture lock for us, which the element did not.
+      if (asset.kind === 'audio') {
+        this.load.audio(asset.id, this.loadableAudioUrl(asset.url));
+      }
     }
   }
 
   create(): void {
     this.orientation = orientationOf(this.viewport());
     this.cameras.main.setBackgroundColor(this.doc.settings.backgroundColor);
-
-    for (const asset of this.doc.assets) {
-      if (asset.kind !== 'audio') continue;
-      const element = new Audio(asset.url);
-      element.preload = 'auto';
-      this.audio.set(asset.id, element);
-    }
 
     this.seedCounters();
 
@@ -664,11 +667,8 @@ export class GameScene extends Phaser.Scene {
       } else if (component.type === 'tappable' && component.enabled) {
         this.makeTappable(node, object, component.paddingX, component.paddingY);
         tappable = true;
-      } else if (component.type === 'audio' && component.autoPlay && this.mode === 'play') {
-        // Play only. Music starting while an author arranges the scene — and
-        // starting again on every keystroke, since each edit restarts the
-        // scene — is not something anyone asked for.
-        this.playSound(component.assetId, component.volume, component.loop);
+      } else if (component.type === 'audio') {
+        entry.sound = this.attachSound(entry, component);
       } else if (component.type === 'body' && this.mode === 'play') {
         // Bodies only exist while playing: gravity pulling a node off screen
         // mid-edit would fight the author for it.
@@ -1280,7 +1280,12 @@ export class GameScene extends Phaser.Scene {
       handlers.set(event, list);
     };
 
-    const objectFor = (nameOrId: string) => this.findLive(nameOrId)?.object;
+    // A sound node draws nothing, so its container is no use to a script. What
+    // a script wants from find('music') is the sound itself.
+    const objectFor = (nameOrId: string) => {
+      const found = this.findLive(nameOrId);
+      return found?.sound ?? found?.object;
+    };
 
     try {
       // Named parameters rather than a context object: a script reads as
@@ -1697,37 +1702,64 @@ export class GameScene extends Phaser.Scene {
 
   // --- audio ----------------------------------------------------------------
 
-  private playSound(assetId: string, volume = 1, loop = false): void {
-    const element = this.audio.get(assetId);
-    if (!element) return;
+  /**
+   * Phaser's audio loader reads its source with XHR and hands the result to
+   * decodeAudioData, and a data URI comes back as text — "parameter 1 is not of
+   * type 'ArrayBuffer'". Every exported playable embeds its assets as data
+   * URIs, so this is the shipped case, not an edge one. A blob URL is the same
+   * bytes at an address the loader can read.
+   */
+  private loadableAudioUrl(url: string): string {
+    if (!url.startsWith('data:')) return url;
 
-    element.volume = volume;
-    element.loop = loop;
-    element.currentTime = 0;
-    // Autoplay policy rejects sound until the player has touched the screen.
-    // That is not a failure — it is the normal way a playable starts — so the
-    // sound waits for the first touch rather than being dropped.
-    void element.play().catch(() => this.playOnFirstTouch(element));
+    const comma = url.indexOf(',');
+    const meta = url.slice(5, comma);
+    if (!meta.includes('base64')) return url;
+
+    try {
+      const binary = atob(url.slice(comma + 1));
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index++) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+
+      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: meta.split(';')[0] }));
+      this.blobUrls.push(blobUrl);
+      return blobUrl;
+    } catch {
+      // Better a sound that does not play than a scene that does not start.
+      return url;
+    }
   }
 
-  private playOnFirstTouch(element: HTMLAudioElement): void {
-    if (this.blockedSounds.includes(element)) return;
+  /**
+   * The node's own sound, kept so a script can reach it by name and so the
+   * component's settings are the sound's settings. Playing it is a run's doing:
+   * music starting while an author arranges the scene — and restarting on every
+   * keystroke, since each edit restarts the scene — is not something anyone
+   * asked for.
+   */
+  private attachSound(
+    entry: LiveNode,
+    component: Extract<GameComponent, { type: 'audio' }>
+  ): Phaser.Sound.BaseSound | undefined {
+    if (!component.assetId || !this.cache.audio.exists(component.assetId)) {
+      return undefined;
+    }
 
-    const first = this.blockedSounds.length === 0;
-    this.blockedSounds.push(element);
-    if (!first) return;
+    const sound = this.sound.add(component.assetId, {
+      volume: component.volume,
+      loop: component.loop
+    });
 
-    // A DOM listener rather than Phaser's, so the call happens inside the
-    // gesture's own event rather than on the next frame.
-    window.addEventListener(
-      'pointerdown',
-      () => {
-        const waiting = this.blockedSounds;
-        this.blockedSounds = [];
-        for (const sound of waiting) void sound.play().catch(() => undefined);
-      },
-      { once: true }
-    );
+    if (component.autoPlay && this.mode === 'play') sound.play();
+    return sound;
+  }
+
+  /** A one-off: every call is its own playback, so two can overlap. */
+  private playSound(assetId: string, volume = 1, loop = false): void {
+    if (!assetId || !this.cache.audio.exists(assetId)) return;
+    this.sound.play(assetId, { volume, loop });
   }
 
   /**
@@ -1738,13 +1770,8 @@ export class GameScene extends Phaser.Scene {
    */
   private teardown(): void {
     this.scale.off('resize', this.relayout, this);
-    this.stopAudio();
-  }
-
-  private stopAudio(): void {
-    for (const element of Array.from(this.audio.values())) {
-      element.pause();
-      element.currentTime = 0;
-    }
+    this.sound.stopAll();
+    for (const url of this.blobUrls) URL.revokeObjectURL(url);
+    this.blobUrls = [];
   }
 }
