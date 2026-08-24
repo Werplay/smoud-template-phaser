@@ -14,6 +14,7 @@ export const PROTOCOL_VERSION = 2;
 export const EDITOR_MESSAGE = {
   doc: 'game-editor:doc',
   select: 'game-editor:select',
+  restart: 'game-editor:restart',
   ready: 'game-editor:ready',
   error: 'game-editor:error',
   selected: 'game-editor:selected',
@@ -79,6 +80,17 @@ export function installEditorBridge(game: Phaser.Game): void {
         // The mode rides along because init reads it before create builds.
         scene()?.scene.restart({
           mode: payload.mode ?? 'edit',
+          scene: payload.scene ?? 'game',
+          snap: payload.snap ?? true
+        });
+        return;
+      }
+
+      if (payload.type === EDITOR_MESSAGE.restart) {
+        // A fresh run of what is already loaded: same document, same mode,
+        // every counter and spawned node discarded.
+        scene()?.scene.restart({
+          mode: payload.mode ?? 'play',
           scene: payload.scene ?? 'game',
           snap: payload.snap ?? true
         });
