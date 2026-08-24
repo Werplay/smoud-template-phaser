@@ -58,6 +58,13 @@ function toColor(hex: string, fallback = 0x000000): number {
   }
 }
 
+/**
+ * What a script registers with on(). The first argument is whatever the event
+ * carries — the other node in a collision, the seconds elapsed in an update —
+ * and the second is the raw event, for the rare script that wants the detail.
+ */
+type ScriptHandler = (payload?: unknown, event?: unknown) => void;
+
 interface LiveNode {
   node: GameNode;
   /** Which scene the node belongs to — scenes are shown one at a time. */
@@ -118,6 +125,10 @@ export class GameScene extends Phaser.Scene {
   };
   /** Reports a drag or a selection back to the editor; unset in a shipped build. */
   private onEditorAction?: (message: Record<string, unknown>) => void;
+  /** Handlers a script registered, keyed by what owns it then by event name. */
+  private scriptHandlers = new Map<string, Map<string, ScriptHandler[]>>();
+  /** One report per script: a throw inside update() would otherwise repeat 60 times a second. */
+  private scriptErrors = new Set<string>();
 
   constructor() {
     super({ key: 'GameScene' });
@@ -208,6 +219,9 @@ export class GameScene extends Phaser.Scene {
       this.enableEditing();
       this.drawSelection();
     } else {
+      // Play only. In edit mode a script's update loop would fight the author
+      // for control of the thing they are trying to position.
+      this.runScripts();
       this.fire({ on: 'start' });
     }
 
@@ -1165,6 +1179,163 @@ export class GameScene extends Phaser.Scene {
         if (!behavior.conditions.every((condition) => this.conditionHolds(condition))) continue;
         this.runActions(behavior, entry, subjectId);
       }
+    }
+
+    this.dispatchToScripts(event, nodeId, subjectId);
+  }
+
+  // --- scripts --------------------------------------------------------------
+
+  /**
+   * Authored code runs as data, not as part of the bundle: the same document
+   * plays here and in the exported file, so what an author tests is what ships.
+   * Nothing is compiled per project, which is what keeps the preview instant
+   * instead of a webpack run per keystroke.
+   *
+   * ponytail: that means an exported file needs `new Function`. If a network
+   * ever ships a CSP that forbids it, compile scripts into the bundle at export
+   * — at the cost of a build per preview.
+   */
+  private runScripts(): void {
+    this.scriptHandlers.clear();
+    this.scriptErrors.clear();
+
+    for (const scene of this.doc.scenes) {
+      if (scene.script.trim()) {
+        this.runScript(`scene:${scene.id}`, scene.name || scene.id, scene.script);
+      }
+    }
+
+    for (const entry of Array.from(this.live.values())) {
+      if (entry.node.script.trim()) {
+        this.runScript(entry.node.id, entry.node.name || entry.node.id, entry.node.script, entry);
+      }
+    }
+  }
+
+  private runScript(owner: string, label: string, source: string, entry?: LiveNode): void {
+    const handlers = new Map<string, ScriptHandler[]>();
+    this.scriptHandlers.set(owner, handlers);
+
+    const on = (event: string, handler: ScriptHandler) => {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    };
+
+    const objectFor = (nameOrId: string) => this.findLive(nameOrId)?.object;
+
+    try {
+      // Named parameters rather than a context object: a script reads as
+      // ordinary code, and there is no `this` to get wrong. Keep this list and
+      // the help text in the editor's script panel in step.
+      const factory = new Function(
+        'node',
+        'scene',
+        'on',
+        'get',
+        'set',
+        'add',
+        'find',
+        'goTo',
+        'win',
+        'lose',
+        `"use strict";\n${source}`
+      );
+
+      factory(
+        entry?.object,
+        this,
+        on,
+        (key: string) => this.counters.get(key) ?? 0,
+        (key: string, value: number) => this.writeCounter(key, value),
+        (key: string, amount: number) => this.writeCounter(key, (this.counters.get(key) ?? 0) + amount),
+        objectFor,
+        (nameOrId: string) => {
+          const scene =
+            this.doc.scenes.find((candidate) => candidate.id === nameOrId) ??
+            this.doc.scenes.find((candidate) => candidate.name === nameOrId);
+          if (scene) this.showScene(scene.id);
+        },
+        () => this.enterState(this.doc.win?.state ?? 'endcard', true),
+        () => this.enterState(this.doc.lose?.state ?? 'lose', true)
+      );
+
+      // No 'start' call here: create() fires it once every script has been
+      // compiled, and calling it here as well ran every start handler twice.
+      if (entry && handlers.has('tap')) this.makeTappableForScript(entry);
+    } catch (error) {
+      this.reportScriptError(owner, label, error);
+    }
+  }
+
+  /**
+   * `on('tap')` in a script is the same declaration a tap behaviour makes, so
+   * it earns the same hit area. Without this the handler is simply never
+   * called, and nothing says why.
+   */
+  private makeTappableForScript(entry: LiveNode): void {
+    const object = entry.object as Phaser.GameObjects.GameObject & { input?: unknown };
+    if (object.input) return;
+    this.makeTappable(entry.node, entry.object, 0, 0);
+  }
+
+  private dispatchToScripts(event: Behavior['event'], nodeId?: string, subjectId?: string): void {
+    if (!this.scriptHandlers.size) return;
+    const subject = subjectId ? this.live.get(subjectId)?.object : undefined;
+
+    for (const [owner, handlers] of Array.from(this.scriptHandlers.entries())) {
+      // A node's script hears its own events; a scene's script hears the lot,
+      // which is what makes it the place to put rules about the whole screen.
+      const isScene = owner.startsWith('scene:');
+      if (nodeId && !isScene && owner !== nodeId) continue;
+
+      this.callHandlers(owner, handlers.get(event.on), subject, event);
+    }
+  }
+
+  private callHandlers(owner: string, handlers: ScriptHandler[] | undefined, payload: unknown, event: unknown): void {
+    if (!handlers) return;
+
+    for (const handler of handlers) {
+      try {
+        handler(payload, event);
+      } catch (error) {
+        this.reportScriptError(owner, owner.replace(/^scene:/, ''), error);
+      }
+    }
+  }
+
+  private reportScriptError(owner: string, label: string, error: unknown): void {
+    // Once per script. An update handler that throws does so every frame, and
+    // sixty identical messages a second buries whatever else went wrong.
+    if (this.scriptErrors.has(owner)) return;
+    this.scriptErrors.add(owner);
+
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[script: ${label}] ${message}`);
+    this.onEditorAction?.({
+      type: 'game-editor:error',
+      message: `Script on "${label}": ${message}`
+    });
+  }
+
+  /** Counters written from a script take the same path as the action does. */
+  private writeCounter(key: string, value: number): void {
+    this.counters.set(key, value);
+    this.refreshTexts();
+    this.fire({ on: 'counterChange', key });
+    this.checkOutcomes();
+  }
+
+  private findLive(nameOrId: string): LiveNode | undefined {
+    return this.live.get(nameOrId) ?? Array.from(this.live.values()).find((entry) => entry.node.name === nameOrId);
+  }
+
+  update(_time: number, delta: number): void {
+    if (!this.scriptHandlers.size) return;
+    for (const [owner, handlers] of Array.from(this.scriptHandlers.entries())) {
+      this.callHandlers(owner, handlers.get('update'), delta / 1000, undefined);
     }
   }
 

@@ -178,6 +178,7 @@ export interface GameNode {
   behaviors: Behavior[];
   children: GameNode[];
   locked: boolean;
+  script: string;
 }
 
 export interface GameAsset {
@@ -194,6 +195,7 @@ export interface GameSceneData {
   name: string;
   role: 'game' | 'endcard' | 'scene';
   nodes: GameNode[];
+  script: string;
 }
 
 export interface GameSettings {
