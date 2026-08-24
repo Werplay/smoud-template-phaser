@@ -129,6 +129,8 @@ export class GameScene extends Phaser.Scene {
   private scriptHandlers = new Map<string, Map<string, ScriptHandler[]>>();
   /** One report per script: a throw inside update() would otherwise repeat 60 times a second. */
   private scriptErrors = new Set<string>();
+  /** Sounds the browser refused for want of a gesture, waiting for the first touch. */
+  private blockedSounds: HTMLAudioElement[] = [];
 
   constructor() {
     super({ key: 'GameScene' });
@@ -155,7 +157,12 @@ export class GameScene extends Phaser.Scene {
     this.visibleScene = (requested ?? start)?.id ?? '';
     this.live = new Map();
     this.counters = new Map();
+    // Stopped, not just dropped: an element that is playing goes on playing
+    // with nothing pointing at it, so every restart used to stack another copy
+    // of the music on top of the last.
+    this.stopAudio();
     this.audio = new Map();
+    this.blockedSounds = [];
     this.state = '';
     this.finished = false;
     this.outcomeLatched = { win: false, lose: false };
@@ -211,6 +218,8 @@ export class GameScene extends Phaser.Scene {
     this.refreshTexts();
     this.relayout();
     this.scale.on('resize', this.relayout, this);
+    this.events.once('shutdown', this.teardown, this);
+    this.events.once('destroy', this.teardown, this);
 
     if (this.mode === 'edit') {
       this.selectionBox = this.add.graphics().setDepth(10_000);
@@ -660,7 +669,10 @@ export class GameScene extends Phaser.Scene {
       } else if (component.type === 'tappable' && component.enabled) {
         this.makeTappable(node, object, component.paddingX, component.paddingY);
         tappable = true;
-      } else if (component.type === 'audio' && component.autoPlay) {
+      } else if (component.type === 'audio' && component.autoPlay && this.mode === 'play') {
+        // Play only. Music starting while an author arranges the scene — and
+        // starting again on every keystroke, since each edit restarts the
+        // scene — is not something anyone asked for.
         this.playSound(component.assetId, component.volume, component.loop);
       } else if (component.type === 'body' && this.mode === 'play') {
         // Bodies only exist while playing: gravity pulling a node off screen
@@ -1652,13 +1664,47 @@ export class GameScene extends Phaser.Scene {
     element.volume = volume;
     element.loop = loop;
     element.currentTime = 0;
-    // Autoplay policy rejects sound before the first interaction; that is
-    // expected on launch, not an error worth surfacing to the player.
-    void element.play().catch(() => undefined);
+    // Autoplay policy rejects sound until the player has touched the screen.
+    // That is not a failure — it is the normal way a playable starts — so the
+    // sound waits for the first touch rather than being dropped.
+    void element.play().catch(() => this.playOnFirstTouch(element));
   }
 
-  shutdown(): void {
+  private playOnFirstTouch(element: HTMLAudioElement): void {
+    if (this.blockedSounds.includes(element)) return;
+
+    const first = this.blockedSounds.length === 0;
+    this.blockedSounds.push(element);
+    if (!first) return;
+
+    // A DOM listener rather than Phaser's, so the call happens inside the
+    // gesture's own event rather than on the next frame.
+    window.addEventListener(
+      'pointerdown',
+      () => {
+        const waiting = this.blockedSounds;
+        this.blockedSounds = [];
+        for (const sound of waiting) void sound.play().catch(() => undefined);
+      },
+      { once: true }
+    );
+  }
+
+  /**
+   * Phaser does not call a scene's shutdown method — it emits an event — so
+   * this is wired in create() rather than left as a method that looks like
+   * lifecycle and never runs. Everything it did was being skipped: the audio it
+   * meant to stop is why restarts piled sounds on top of each other.
+   */
+  private teardown(): void {
     this.scale.off('resize', this.relayout, this);
-    for (const element of Array.from(this.audio.values())) element.pause();
+    this.stopAudio();
+  }
+
+  private stopAudio(): void {
+    for (const element of Array.from(this.audio.values())) {
+      element.pause();
+      element.currentTime = 0;
+    }
   }
 }
