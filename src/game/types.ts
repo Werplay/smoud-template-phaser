@@ -72,7 +72,7 @@ export type NodeProps = Partial<SpriteProps & TextProps & ShapeProps>;
 export type GameComponent =
   | { type: 'tappable'; paddingX: number; paddingY: number; enabled: boolean }
   | { type: 'draggable'; axis: 'both' | 'x' | 'y'; returnOnRelease: boolean; bringToTop: boolean }
-  | { type: 'dropZone'; accepts: string[]; snap: boolean }
+  | { type: 'dropZone'; accepts: string[]; snap: boolean; lockOnCorrect: boolean }
   | {
       type: 'spawner';
       sources: string[];
