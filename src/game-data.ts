@@ -4,7 +4,7 @@ import type { GameDoc } from './game/types';
 // arrangement playclip-data.ts uses. What is here is the placeholder the
 // template runs with on its own (`npm run dev`).
 export const GAME_DATA = {
-  schemaVersion: 1,
+  schemaVersion: 3,
   name: 'Untitled',
   defaultLocale: 'en',
   locales: ['en'],

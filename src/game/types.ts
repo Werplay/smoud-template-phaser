@@ -44,7 +44,7 @@ export interface TransformOverrides {
   landscape?: Partial<Transform>;
 }
 
-export type NodeKind = 'container' | 'sprite' | 'text' | 'shape';
+export type NodeKind = 'container' | 'sprite' | 'text' | 'shape' | 'sound';
 
 export interface SpriteProps {
   assetId: string;

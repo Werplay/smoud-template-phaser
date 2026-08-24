@@ -706,7 +706,11 @@ export class GameScene extends Phaser.Scene {
   private createObject(node: GameNode): Phaser.GameObjects.GameObject | undefined {
     const props = node.props || {};
 
-    if (node.kind === 'container') return this.add.container(0, 0);
+    // A sound is an empty container: nothing is drawn, but the node still
+    // exists, so its audio component runs like any other.
+    if (node.kind === 'container' || node.kind === 'sound') {
+      return this.add.container(0, 0);
+    }
 
     if (node.kind === 'sprite') {
       const key = props.assetId;
