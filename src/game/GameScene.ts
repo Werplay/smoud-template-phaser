@@ -74,6 +74,8 @@ export class GameScene extends Phaser.Scene {
   private orientation: Orientation = 'portrait';
   private state = '';
   private finished = false;
+  /** Whether each outcome is currently satisfied, so it fires once per run. */
+  private outcomeLatched: { win: boolean; lose: boolean } = { win: false, lose: false };
   private mode: RuntimeMode = 'play';
   /**
    * The scene on screen. Exactly one at a time: the endcard replaces the game
@@ -136,6 +138,7 @@ export class GameScene extends Phaser.Scene {
     this.audio = new Map();
     this.state = '';
     this.finished = false;
+    this.outcomeLatched = { win: false, lose: false };
     this.bodiesByTag = new Map();
     this.timers = [];
     this.dropZones = [];
@@ -1277,8 +1280,8 @@ export class GameScene extends Phaser.Scene {
 
   // --- state ----------------------------------------------------------------
 
-  private enterState(name: string): void {
-    if (this.state === name) return;
+  private enterState(name: string, force = false): void {
+    if (this.state === name && !force) return;
     this.state = name;
 
     const state = this.doc.states.find((candidate) => candidate.name === name);
@@ -1314,12 +1317,27 @@ export class GameScene extends Phaser.Scene {
     this.applyTransform(entry);
   }
 
+  /**
+   * Outcomes fire on a rising edge and re-arm when their conditions stop
+   * holding. A lose state that resets whatever it watched can therefore be
+   * reached again — without the latch the state simply stayed put and a second
+   * loss was silent, which looks like the rule working exactly once.
+   */
   private checkOutcomes(): void {
-    const reached = (outcome: Outcome | undefined) =>
-      !!outcome && outcome.conditions.every((condition) => this.conditionHolds(condition));
+    for (const kind of ['win', 'lose'] as const) {
+      const outcome = this.doc[kind];
+      if (!outcome) continue;
 
-    if (reached(this.doc.win)) this.enterState(this.doc.win!.state);
-    else if (reached(this.doc.lose)) this.enterState(this.doc.lose!.state);
+      const holds = outcome.conditions.every((condition) => this.conditionHolds(condition));
+      if (holds && !this.outcomeLatched[kind]) {
+        this.outcomeLatched[kind] = true;
+        // Forced, because a repeat of the same outcome is a fresh entry even
+        // though the state has not changed.
+        this.enterState(outcome.state, true);
+      } else if (!holds) {
+        this.outcomeLatched[kind] = false;
+      }
+    }
   }
 
   // --- audio ----------------------------------------------------------------
