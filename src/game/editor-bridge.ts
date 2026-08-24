@@ -21,6 +21,8 @@ interface EditorPayload {
   /** Whether dragging aligns to what is already on screen. */
   snap?: boolean;
   nodeId?: string | null;
+  /** The full selection, when the editor has more than one node chosen. */
+  nodeIds?: string[];
 }
 
 /**
@@ -76,7 +78,7 @@ export function installEditorBridge(game: Phaser.Game): void {
       }
 
       if (payload.type === EDITOR_MESSAGE.select) {
-        scene()?.setSelected(payload.nodeId ?? null);
+        scene()?.setSelected(payload.nodeIds ?? (payload.nodeId ? [payload.nodeId] : []));
       }
     } catch (error) {
       report(error instanceof Error ? error.message : String(error));

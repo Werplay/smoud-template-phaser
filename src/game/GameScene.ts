@@ -100,7 +100,7 @@ export class GameScene extends Phaser.Scene {
   /** Nodes a spawner uses as prototypes; hidden while playing. */
   private prototypes = new Set<string>();
   private aliveBySpawner = new Map<string, number>();
-  private selectedId: string | null = null;
+  private selectedIds: string[] = [];
   private selectionBox?: Phaser.GameObjects.Graphics;
   private guideLayer?: Phaser.GameObjects.Graphics;
   private snapEnabled = true;
@@ -217,9 +217,15 @@ export class GameScene extends Phaser.Scene {
     this.onEditorAction = report;
   }
 
-  setSelected(nodeId: string | null): void {
-    this.selectedId = nodeId;
+  setSelected(nodeIds: string[]): void {
+    this.selectedIds = nodeIds;
     this.drawSelection();
+  }
+
+  /** The node the handles belong to: the last one chosen. */
+  private primarySelection(): LiveNode | undefined {
+    const id = this.selectedIds[this.selectedIds.length - 1];
+    return id ? this.live.get(id) : undefined;
   }
 
   /**
@@ -246,8 +252,12 @@ export class GameScene extends Phaser.Scene {
       this.input.setDraggable(object as Phaser.GameObjects.GameObject, true);
 
       object.on('pointerdown', () => {
-        this.setSelected(entry.node.id);
-        this.onEditorAction?.({ type: 'game-editor:selected', nodeId: entry.node.id });
+        // Clicking something already chosen keeps the group, so a drag can
+        // start from any member of it.
+        if (!this.selectedIds.includes(entry.node.id)) {
+          this.setSelected([entry.node.id]);
+          this.onEditorAction?.({ type: 'game-editor:selected', nodeId: entry.node.id });
+        }
       });
     }
 
@@ -257,7 +267,7 @@ export class GameScene extends Phaser.Scene {
     // grabbing one never deselects what it belongs to.
     this.input.on('pointerdown', (_pointer: Phaser.Input.Pointer, currentlyOver: Phaser.GameObjects.GameObject[]) => {
       if (currentlyOver.length) return;
-      this.setSelected(null);
+      this.setSelected([]);
       this.onEditorAction?.({ type: 'game-editor:selected', nodeId: null });
     });
 
@@ -286,6 +296,21 @@ export class GameScene extends Phaser.Scene {
           entry && this.snapEnabled
             ? this.alignWhileDragging(entry, dragX, dragY)
             : { x: dragX, y: dragY, guides: [] as Guide[] };
+
+        // Everything else in the selection travels by the same amount, so a
+        // group keeps its arrangement rather than collapsing onto one point.
+        const shiftX = aligned.x - moved.x;
+        const shiftY = aligned.y - moved.y;
+        if (entry && this.selectedIds.length > 1 && this.selectedIds.includes(entry.node.id)) {
+          for (const id of this.selectedIds) {
+            if (id === entry.node.id) continue;
+            const other = this.live.get(id);
+            if (!other) continue;
+            const target = other.object as unknown as { x: number; y: number };
+            target.x += shiftX;
+            target.y += shiftY;
+          }
+        }
 
         moved.x = aligned.x;
         moved.y = aligned.y;
@@ -326,6 +351,23 @@ export class GameScene extends Phaser.Scene {
       if (x !== Math.round(entry.transform.x) || y !== Math.round(entry.transform.y)) {
         entry.transform = { ...entry.transform, x, y };
         this.onEditorAction?.({ type: 'game-editor:moved', nodeId: entry.node.id, x, y });
+
+        // The rest of a dragged group moved too, and each has its own offset.
+        for (const id of this.selectedIds) {
+          if (id === entry.node.id) continue;
+          const other = this.live.get(id);
+          if (!other) continue;
+
+          const placed = other.object as unknown as { x: number; y: number };
+          const theirs = other.isRoot
+            ? rootOffsetFromScreen(placed, other.transform, design, this.viewport())
+            : { x: placed.x, y: placed.y };
+
+          const ox = Math.round(theirs.x);
+          const oy = Math.round(theirs.y);
+          other.transform = { ...other.transform, x: ox, y: oy };
+          this.onEditorAction?.({ type: 'game-editor:moved', nodeId: id, x: ox, y: oy });
+        }
       }
 
       this.drawSelection();
@@ -468,7 +510,17 @@ export class GameScene extends Phaser.Scene {
     if (!box) return;
 
     box.clear();
-    const entry = this.selectedId ? this.live.get(this.selectedId) : undefined;
+    // Everything chosen is outlined; only the last one gets handles, because
+    // scaling six things from one corner is not a gesture anyone means.
+    for (const id of this.selectedIds) {
+      const chosen = this.live.get(id);
+      const outline = chosen ? this.selectionGeometry(chosen) : undefined;
+      if (!outline) continue;
+      box.lineStyle(2, SELECTION_COLOR, id === this.selectedIds[this.selectedIds.length - 1] ? 0.9 : 0.4);
+      box.strokePoints(this.cornerPoints(outline), true);
+    }
+
+    const entry = this.primarySelection();
     const geometry = entry ? this.selectionGeometry(entry) : undefined;
 
     if (!geometry) {
@@ -477,8 +529,6 @@ export class GameScene extends Phaser.Scene {
     }
 
     const corners = this.cornerPoints(geometry);
-    box.lineStyle(2, SELECTION_COLOR, 0.9);
-    box.strokePoints(corners, true);
 
     // The rotate arm sticks out past the top edge, away from the box.
     const topMid = corners[0].clone().add(corners[1]).scale(0.5);
@@ -496,7 +546,7 @@ export class GameScene extends Phaser.Scene {
 
   /** Begins a scale or rotate gesture, capturing what it measures against. */
   private beginGesture(role: 'scale' | 'rotate', pointer: Phaser.Input.Pointer): void {
-    const entry = this.selectedId ? this.live.get(this.selectedId) : undefined;
+    const entry = this.primarySelection();
     const geometry = entry ? this.selectionGeometry(entry) : undefined;
     if (!entry || !geometry) return;
 
