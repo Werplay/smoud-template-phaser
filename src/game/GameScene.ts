@@ -1310,7 +1310,13 @@ export class GameScene extends Phaser.Scene {
     // a script wants from find('music') is the sound itself.
     const objectFor = (nameOrId: string) => {
       const found = this.findLive(nameOrId);
-      if (!found) return undefined;
+      /**
+       * Says what is missing, rather than handing back undefined for a script
+       * to trip over one line later. "Cannot read properties of undefined
+       * (reading 'setText')" tells an author nothing about which name was
+       * wrong; this names it, and lists what there is to choose from.
+       */
+      if (!found) throw new Error(`There is no node called "${nameOrId}". ${this.nameList()}`);
 
       // Only a sound node IS its sound — it draws nothing, so there is no
       // other object to want. Anything else is a thing on screen that may also
@@ -1435,6 +1441,15 @@ export class GameScene extends Phaser.Scene {
     target.sound = entry.sound;
   }
 
+  /** The object a script would get from find(), for a node id. */
+  private objectOf(nodeId: string): Phaser.GameObjects.GameObject | undefined {
+    const entry = this.live.get(nodeId);
+    if (!entry) return undefined;
+    this.describeFill(entry);
+    this.attachNodeActions(entry);
+    return entry.object;
+  }
+
   private dispatchToScripts(event: Behavior['event'], nodeId?: string, subjectId?: string): void {
     if (!this.scriptHandlers.size) return;
 
@@ -1445,7 +1460,12 @@ export class GameScene extends Phaser.Scene {
       event.on === 'counterChange'
         ? { key: event.key, value: this.counters.get(event.key) ?? 0 }
         : subjectId
-        ? this.live.get(subjectId)?.object
+        ? this.objectOf(subjectId)
+        : // A tap names the node it landed on. Without it a scene script
+        // hearing every tap cannot tell which of nine cells was pressed,
+        // which is most of what a scene script is for.
+        nodeId
+        ? this.objectOf(nodeId)
         : undefined;
 
     for (const [owner, handlers] of Array.from(this.scriptHandlers.entries())) {
@@ -1490,6 +1510,17 @@ export class GameScene extends Phaser.Scene {
     this.refreshTexts();
     this.fire({ on: 'counterChange', key });
     this.checkOutcomes();
+  }
+
+  /** What a script could have meant, for an error worth reading. */
+  private nameList(): string {
+    const names = Array.from(this.live.values())
+      .filter((entry) => entry.sceneId === this.visibleScene)
+      .map((entry) => entry.node.name || entry.node.id);
+
+    if (!names.length) return 'This scene has no nodes.';
+    const shown = names.slice(0, 12).join(', ');
+    return `This scene has: ${shown}${names.length > 12 ? `, and ${names.length - 12} more` : ''}.`;
   }
 
   private findLive(nameOrId: string): LiveNode | undefined {
