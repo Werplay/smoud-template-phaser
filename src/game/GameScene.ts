@@ -1355,6 +1355,7 @@ export class GameScene extends Phaser.Scene {
         'add',
         'find',
         'goTo',
+        'setState',
         'win',
         'lose',
         `"use strict";\n${source}`
@@ -1374,6 +1375,10 @@ export class GameScene extends Phaser.Scene {
             this.doc.scenes.find((candidate) => candidate.name === nameOrId);
           if (scene) this.showScene(scene.id);
         },
+        // The same thing the set-state action does. win() and lose() were
+        // already this with the name filled in, so leaving it out was an
+        // arbitrary hole — and the copilot reached through it twice.
+        (name: string) => this.enterState(name, true),
         () => this.enterState(this.doc.win?.state ?? 'endcard', true),
         () => this.enterState(this.doc.lose?.state ?? 'lose', true)
       );
