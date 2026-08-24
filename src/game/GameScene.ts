@@ -61,7 +61,7 @@ function toColor(hex: string, fallback = 0x000000): number {
 interface LiveNode {
   node: GameNode;
   /** Which scene the node belongs to — scenes are shown one at a time. */
-  sceneRole: 'game' | 'endcard';
+  sceneId: string;
   object: Phaser.GameObjects.GameObject;
   /** Authored transform with the current orientation's patch applied, mutated by tweens. */
   transform: Transform;
@@ -84,7 +84,7 @@ export class GameScene extends Phaser.Scene {
    * rather than covering it, which is what it does in a shipped playable and
    * what an author editing one expects to see.
    */
-  private visibleScene: 'game' | 'endcard' = 'game';
+  private visibleScene = '';
   /** Nodes with a physics body, kept per tag so colliders can be declared between tags. */
   private bodiesByTag = new Map<string, Phaser.GameObjects.GameObject[]>();
   private timers: Phaser.Time.TimerEvent[] = [];
@@ -131,13 +131,17 @@ export class GameScene extends Phaser.Scene {
    * counter or a spawned node surviving that would make the preview disagree
    * with a fresh load of the same document.
    */
-  init(data?: { mode?: RuntimeMode; scene?: 'game' | 'endcard'; snap?: boolean }): void {
+  init(data?: { mode?: RuntimeMode; scene?: string; snap?: boolean }): void {
     this.doc = getDoc();
     if (data?.mode) this.mode = data.mode;
     this.snapEnabled = data?.snap ?? true;
+
     // Editing follows the tab the author is on; playing always opens on the
-    // game and reaches the endcard by entering its state.
-    this.visibleScene = this.mode === 'edit' ? data?.scene ?? 'game' : 'game';
+    // scene marked as the start, whatever it happens to be called.
+    const start = this.doc.scenes.find((scene) => scene.role === 'game') ?? this.doc.scenes[0];
+    const requested =
+      this.mode === 'edit' && data?.scene ? this.doc.scenes.find((scene) => scene.id === data.scene) : undefined;
+    this.visibleScene = (requested ?? start)?.id ?? '';
     this.live = new Map();
     this.counters = new Map();
     this.audio = new Map();
@@ -174,7 +178,7 @@ export class GameScene extends Phaser.Scene {
 
     for (const scene of this.doc.scenes) {
       for (const node of scene.nodes) {
-        this.buildNode(node, undefined, scene.role);
+        this.buildNode(node, undefined, scene.id);
       }
     }
 
@@ -235,7 +239,7 @@ export class GameScene extends Phaser.Scene {
    */
   private enableEditing(): void {
     for (const entry of Array.from(this.live.values())) {
-      if (entry.node.locked || entry.sceneRole !== this.visibleScene) continue;
+      if (entry.node.locked || entry.sceneId !== this.visibleScene) continue;
 
       const object = entry.object as Phaser.GameObjects.GameObject & {
         setInteractive: (config?: object) => unknown;
@@ -475,7 +479,7 @@ export class GameScene extends Phaser.Scene {
 
     const others: Rect[] = [];
     for (const candidate of Array.from(this.live.values())) {
-      if (candidate === entry || candidate.sceneRole !== this.visibleScene) continue;
+      if (candidate === entry || candidate.sceneId !== this.visibleScene) continue;
       if (!candidate.transform.visible) continue;
       const rect = this.screenRect(candidate);
       if (rect) others.push(rect);
@@ -617,14 +621,14 @@ export class GameScene extends Phaser.Scene {
 
   // --- building -------------------------------------------------------------
 
-  private buildNode(node: GameNode, parent: Phaser.GameObjects.Container | undefined, sceneRole: 'game' | 'endcard'): void {
+  private buildNode(node: GameNode, parent: Phaser.GameObjects.Container | undefined, sceneId: string): void {
     const transform = resolveTransform(node.transform, node.overrides, this.orientation);
     const object = this.createObject(node);
     if (!object) return;
 
     const entry: LiveNode = {
       node,
-      sceneRole,
+      sceneId,
       object,
       transform: { ...transform },
       isRoot: !parent
@@ -681,7 +685,7 @@ export class GameScene extends Phaser.Scene {
         console.warn(`[GameScene] ${node.id} is a ${node.kind}; only containers can hold children`);
         break;
       }
-      this.buildNode(child, container, sceneRole);
+      this.buildNode(child, container, sceneId);
     }
   }
 
@@ -917,7 +921,7 @@ export class GameScene extends Phaser.Scene {
       y: spawner.transform.y + spread(component.area.height)
     };
 
-    this.buildNode(clone, undefined, spawner.sceneRole);
+    this.buildNode(clone, undefined, spawner.sceneId);
     const spawned = this.live.get(clone.id);
     if (!spawned) return;
 
@@ -1141,7 +1145,7 @@ export class GameScene extends Phaser.Scene {
     setters.setDepth?.(transform.depth);
     setters.setVisible?.(
       transform.visible &&
-        entry.sceneRole === this.visibleScene &&
+        entry.sceneId === this.visibleScene &&
         !(this.mode === 'play' && this.prototypes.has(entry.node.id))
     );
     // Containers have no origin; everything else is centred by default.
@@ -1249,6 +1253,10 @@ export class GameScene extends Phaser.Scene {
 
       case 'resetPositions':
         this.resetPositions();
+        return;
+
+      case 'goToScene':
+        this.showScene(action.sceneId);
         return;
 
       case 'playSound':
@@ -1409,9 +1417,8 @@ export class GameScene extends Phaser.Scene {
       for (const id of state.show) this.setVisible(id, true);
     }
 
-    if (name === 'endcard' && this.doc.scenes.some((scene) => scene.role === 'endcard')) {
-      this.showScene('endcard');
-    }
+    const endcard = this.doc.scenes.find((scene) => scene.role === 'endcard');
+    if (name === 'endcard' && endcard) this.showScene(endcard.id);
 
     this.fire({ on: 'stateEnter', state: name });
 
@@ -1421,10 +1428,12 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Puts one scene on screen and takes the other off. */
-  private showScene(role: 'game' | 'endcard'): void {
-    if (this.visibleScene === role) return;
-    this.visibleScene = role;
+  /** Puts one scene on screen and takes the others off. */
+  private showScene(sceneId: string): void {
+    if (this.visibleScene === sceneId || !this.doc.scenes.some((s) => s.id === sceneId)) {
+      return;
+    }
+    this.visibleScene = sceneId;
     for (const entry of Array.from(this.live.values())) this.applyTransform(entry);
     this.drawSelection();
   }

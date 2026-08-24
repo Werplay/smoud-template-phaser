@@ -154,6 +154,7 @@ export type GameAction =
   | { do: 'openCta' }
   | { do: 'resetPosition'; target?: string }
   | { do: 'resetPositions' }
+  | { do: 'goToScene'; sceneId: string }
   | { do: 'shake'; target?: string; intensity: number; duration: number }
   | { do: 'wait'; seconds: number };
 
@@ -190,7 +191,8 @@ export interface GameAsset {
 
 export interface GameSceneData {
   id: string;
-  role: 'game' | 'endcard';
+  name: string;
+  role: 'game' | 'endcard' | 'scene';
   nodes: GameNode[];
 }
 
