@@ -643,7 +643,9 @@ export class GameScene extends Phaser.Scene {
               if (typeof condition.value !== 'number') note(condition.value.counter);
             }
             for (const action of behavior.actions) {
-              if (action.do === 'addToCounter') note(action.key);
+              if (action.do === 'addToCounter' || action.do === 'setCounter') {
+                note(action.key);
+              }
             }
           }
           walk(node.children);
@@ -1121,8 +1123,10 @@ export class GameScene extends Phaser.Scene {
         this.enterState(action.state);
         return;
 
-      case 'addToCounter': {
-        const next = (this.counters.get(action.key) ?? 0) + action.amount;
+      case 'addToCounter':
+      case 'setCounter': {
+        const next = action.do === 'setCounter' ? action.value : (this.counters.get(action.key) ?? 0) + action.amount;
+
         this.counters.set(action.key, next);
         this.refreshTexts();
         this.fire({ on: 'counterChange', key: action.key });

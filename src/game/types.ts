@@ -146,6 +146,7 @@ export type GameAction =
   | { do: 'spawn'; target?: string }
   | { do: 'playSound'; assetId: string }
   | { do: 'addToCounter'; key: string; amount: number }
+  | { do: 'setCounter'; key: string; value: number }
   | { do: 'setState'; state: string }
   | { do: 'openCta' }
   | { do: 'resetPositions' }
