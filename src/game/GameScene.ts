@@ -638,7 +638,9 @@ export class GameScene extends Phaser.Scene {
           for (const behavior of node.behaviors) {
             if (behavior.event.on === 'counterChange') note(behavior.event.key);
             for (const condition of behavior.conditions) {
-              if (condition.check === 'counter') note(condition.key);
+              if (condition.check !== 'counter') continue;
+              note(condition.key);
+              if (typeof condition.value !== 'number') note(condition.value.counter);
             }
             for (const action of behavior.actions) {
               if (action.do === 'addToCounter') note(action.key);
@@ -652,7 +654,9 @@ export class GameScene extends Phaser.Scene {
 
     for (const outcome of [this.doc.win, this.doc.lose]) {
       for (const condition of outcome?.conditions ?? []) {
-        if (condition.check === 'counter') note(condition.key);
+        if (condition.check !== 'counter') continue;
+        note(condition.key);
+        if (typeof condition.value !== 'number') note(condition.value.counter);
       }
     }
   }
@@ -1057,20 +1061,24 @@ export class GameScene extends Phaser.Scene {
   private conditionHolds(condition: Condition): boolean {
     if (condition.check === 'state') return this.state === condition.state;
 
-    const value = this.counters.get(condition.key) ?? 0;
+    const left = this.counters.get(condition.key) ?? 0;
+    // The right-hand side is a fixed number or another counter, so a rule like
+    // "placed >= total" moves as the game does.
+    const right = typeof condition.value === 'number' ? condition.value : this.counters.get(condition.value.counter) ?? 0;
+
     switch (condition.op) {
       case '<':
-        return value < condition.value;
+        return left < right;
       case '<=':
-        return value <= condition.value;
+        return left <= right;
       case '==':
-        return value === condition.value;
+        return left === right;
       case '>=':
-        return value >= condition.value;
+        return left >= right;
       case '>':
-        return value > condition.value;
+        return left > right;
       default:
-        return value !== condition.value;
+        return left !== right;
     }
   }
 

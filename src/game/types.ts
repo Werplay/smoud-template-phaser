@@ -118,7 +118,13 @@ export type GameEvent =
   | { on: 'stateEnter'; state: string };
 
 export type Condition =
-  | { check: 'counter'; key: string; op: '<' | '<=' | '==' | '>=' | '>' | '!='; value: number }
+  | {
+      check: 'counter';
+      key: string;
+      op: '<' | '<=' | '==' | '>=' | '>' | '!=';
+      /** A fixed number, or another counter to compare against. */
+      value: number | { counter: string };
+    }
   | { check: 'state'; state: string };
 
 export type Easing = 'linear' | 'quadIn' | 'quadOut' | 'quadInOut' | 'backOut' | 'bounceOut' | 'elasticOut';
