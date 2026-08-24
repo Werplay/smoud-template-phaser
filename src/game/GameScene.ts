@@ -1109,6 +1109,10 @@ export class GameScene extends Phaser.Scene {
         sdk.install();
         return;
 
+      case 'resetPositions':
+        this.resetPositions();
+        return;
+
       case 'playSound':
         this.playSound(action.assetId);
         return;
@@ -1213,6 +1217,29 @@ export class GameScene extends Phaser.Scene {
         target.transform = destination;
       }
     });
+  }
+
+  /**
+   * Back to the authored layout: every node returns to where it was placed, a
+   * locked piece can be dragged again, and a slot that had claimed one is open.
+   * Counters are left alone — putting the pieces back is not the same as
+   * undoing the score, and a round that ended in a loss usually wants both
+   * decided separately.
+   */
+  private resetPositions(): void {
+    for (const entry of Array.from(this.live.values())) {
+      entry.transform = {
+        ...resolveTransform(entry.node.transform, entry.node.overrides, this.orientation)
+      };
+      this.applyTransform(entry);
+
+      if (entry.node.components.some((component) => component.type === 'draggable')) {
+        this.input.setDraggable(entry.object as Phaser.GameObjects.GameObject, true);
+      }
+    }
+
+    for (const zone of this.dropZones) zone.filled = false;
+    this.drawSelection();
   }
 
   private resolve(nodeId: string | undefined, fallback: LiveNode): LiveNode | undefined {

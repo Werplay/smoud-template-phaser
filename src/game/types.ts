@@ -148,6 +148,7 @@ export type GameAction =
   | { do: 'addToCounter'; key: string; amount: number }
   | { do: 'setState'; state: string }
   | { do: 'openCta' }
+  | { do: 'resetPositions' }
   | { do: 'shake'; target?: string; intensity: number; duration: number }
   | { do: 'wait'; seconds: number };
 
