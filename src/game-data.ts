@@ -21,6 +21,7 @@ export const GAME_DATA = {
   scenes: [
     {
       id: 'main',
+      script: '',
       role: 'game',
       nodes: [
         {
@@ -52,7 +53,8 @@ export const GAME_DATA = {
           components: [],
           behaviors: [],
           children: [],
-          locked: false
+          locked: false,
+          script: ''
         },
         {
           id: 'cta',
@@ -85,7 +87,8 @@ export const GAME_DATA = {
             }
           ],
           children: [],
-          locked: false
+          locked: false,
+          script: ''
         }
       ]
     }
