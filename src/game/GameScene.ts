@@ -2,6 +2,7 @@ import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { getDoc } from './doc-source';
 import { orientationOf, resolveTransform, rootOffsetFromScreen, rootPlacement, type Size } from './layout';
+import { type Guide, type Rect, rectOf, snap } from './snapping';
 import { OTHER_TARGET } from './types';
 import type {
   Behavior,
@@ -31,6 +32,7 @@ let spawnCounter = 0;
 export type RuntimeMode = 'edit' | 'play';
 
 const SELECTION_COLOR = 0xb8ff3c;
+const GUIDE_COLOR = 0x3de8ff;
 const HANDLE_RADIUS = 7;
 const ROTATE_ARM_LENGTH = 28;
 /** A node can be shrunk but not inverted or vanished by a corner drag. */
@@ -100,6 +102,8 @@ export class GameScene extends Phaser.Scene {
   private aliveBySpawner = new Map<string, number>();
   private selectedId: string | null = null;
   private selectionBox?: Phaser.GameObjects.Graphics;
+  private guideLayer?: Phaser.GameObjects.Graphics;
+  private snapEnabled = true;
   private handles: Phaser.GameObjects.Arc[] = [];
   /** Live gesture on a scale or rotate handle; absent while nothing is dragging. */
   private gesture?: {
@@ -127,9 +131,10 @@ export class GameScene extends Phaser.Scene {
    * counter or a spawned node surviving that would make the preview disagree
    * with a fresh load of the same document.
    */
-  init(data?: { mode?: RuntimeMode; scene?: 'game' | 'endcard' }): void {
+  init(data?: { mode?: RuntimeMode; scene?: 'game' | 'endcard'; snap?: boolean }): void {
     this.doc = getDoc();
     if (data?.mode) this.mode = data.mode;
+    this.snapEnabled = data?.snap ?? true;
     // Editing follows the tab the author is on; playing always opens on the
     // game and reaches the endcard by entering its state.
     this.visibleScene = this.mode === 'edit' ? data?.scene ?? 'game' : 'game';
@@ -194,6 +199,7 @@ export class GameScene extends Phaser.Scene {
 
     if (this.mode === 'edit') {
       this.selectionBox = this.add.graphics().setDepth(10_000);
+      this.guideLayer = this.add.graphics().setDepth(9_999);
       this.createHandles();
       this.enableEditing();
       this.drawSelection();
@@ -270,9 +276,20 @@ export class GameScene extends Phaser.Scene {
           return;
         }
 
+        const entry = Array.from(this.live.values()).find((candidate) => candidate.object === object);
         const moved = object as unknown as { x: number; y: number };
-        moved.x = dragX;
-        moved.y = dragY;
+
+        // A toolbar toggle rather than a held modifier: keyboard modifiers
+        // reach an iframe only when it holds focus, which during a drag begun
+        // from the parent page it may not.
+        const aligned =
+          entry && this.snapEnabled
+            ? this.alignWhileDragging(entry, dragX, dragY)
+            : { x: dragX, y: dragY, guides: [] as Guide[] };
+
+        moved.x = aligned.x;
+        moved.y = aligned.y;
+        this.drawGuides(aligned.guides);
         this.drawSelection();
       }
     );
@@ -283,6 +300,8 @@ export class GameScene extends Phaser.Scene {
         this.drawSelection();
         return;
       }
+
+      this.drawGuides([]);
 
       const entry = Array.from(this.live.values()).find((candidate) => candidate.object === object);
       if (!entry) return;
@@ -392,6 +411,56 @@ export class GameScene extends Phaser.Scene {
       [box.halfW, box.halfH],
       [-box.halfW, box.halfH]
     ].map(([x, y]) => new Phaser.Math.Vector2(box.center.x + x * cos - y * sin, box.center.y + x * sin + y * cos));
+  }
+
+  /** The rectangle a node occupies on screen, for aligning against. */
+  private screenRect(entry: LiveNode): Rect | undefined {
+    const geometry = this.selectionGeometry(entry);
+    if (!geometry) return undefined;
+    return rectOf(geometry.center.x, geometry.center.y, geometry.halfW * 2, geometry.halfH * 2);
+  }
+
+  /**
+   * Nudges a drag onto alignment with everything else visible, and with the
+   * middle of the screen. Edges and centres both count, because "line these up"
+   * means either depending on what is being built.
+   */
+  private alignWhileDragging(entry: LiveNode, dragX: number, dragY: number): { x: number; y: number; guides: Guide[] } {
+    const geometry = this.selectionGeometry(entry);
+    if (!geometry) return { x: dragX, y: dragY, guides: [] };
+
+    const moving = rectOf(dragX, dragY, geometry.halfW * 2, geometry.halfH * 2);
+
+    const others: Rect[] = [];
+    for (const candidate of Array.from(this.live.values())) {
+      if (candidate === entry || candidate.sceneRole !== this.visibleScene) continue;
+      if (!candidate.transform.visible) continue;
+      const rect = this.screenRect(candidate);
+      if (rect) others.push(rect);
+    }
+
+    // The centre of the view, so a node can be centred with nothing else on screen.
+    const { width, height } = this.viewport();
+    others.push(rectOf(width / 2, height / 2, 0, 0));
+
+    const result = snap(moving, others);
+    return { x: dragX + result.dx, y: dragY + result.dy, guides: result.guides };
+  }
+
+  private drawGuides(guides: Guide[]): void {
+    const layer = this.guideLayer;
+    if (!layer) return;
+
+    layer.clear();
+    if (!guides.length) return;
+
+    const { width, height } = this.viewport();
+    layer.lineStyle(1, GUIDE_COLOR, 0.9);
+
+    for (const guide of guides) {
+      if (guide.axis === 'x') layer.lineBetween(guide.at, 0, guide.at, height);
+      else layer.lineBetween(0, guide.at, width, guide.at);
+    }
   }
 
   private drawSelection(): void {

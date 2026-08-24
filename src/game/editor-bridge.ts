@@ -18,6 +18,8 @@ interface EditorPayload {
   mode?: RuntimeMode;
   /** Which scene the editor is showing; only meaningful while editing. */
   scene?: 'game' | 'endcard';
+  /** Whether dragging aligns to what is already on screen. */
+  snap?: boolean;
   nodeId?: string | null;
 }
 
@@ -67,7 +69,8 @@ export function installEditorBridge(game: Phaser.Game): void {
         // The mode rides along because init reads it before create builds.
         scene()?.scene.restart({
           mode: payload.mode ?? 'edit',
-          scene: payload.scene ?? 'game'
+          scene: payload.scene ?? 'game',
+          snap: payload.snap ?? true
         });
         return;
       }
