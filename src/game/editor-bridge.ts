@@ -3,6 +3,14 @@ import { setDoc } from './doc-source';
 import type { GameScene, RuntimeMode } from './GameScene';
 import type { GameDoc } from './types';
 
+/**
+ * Bumped whenever the editor and the runtime have to agree on something new.
+ * The editor compares it against what it expects and says so when a cached
+ * bundle is behind — a mismatch used to show up as features silently not
+ * working, which is a bad way to learn your browser kept an old copy.
+ */
+export const PROTOCOL_VERSION = 2;
+
 export const EDITOR_MESSAGE = {
   doc: 'game-editor:doc',
   select: 'game-editor:select',
@@ -86,5 +94,5 @@ export function installEditorBridge(game: Phaser.Game): void {
   });
 
   ensureHooks();
-  send({ type: EDITOR_MESSAGE.ready });
+  send({ type: EDITOR_MESSAGE.ready, protocol: PROTOCOL_VERSION });
 }
