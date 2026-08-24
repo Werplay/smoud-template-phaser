@@ -264,19 +264,14 @@ export class GameScene extends Phaser.Scene {
     for (const entry of Array.from(this.live.values())) {
       if (entry.node.locked || entry.sceneId !== this.visibleScene) continue;
 
-      const object = entry.object as Phaser.GameObjects.GameObject & {
-        setInteractive: (config?: object) => unknown;
-        input?: unknown;
-      };
+      const object = entry.object;
 
-      // Containers have no size of their own until something is inside them,
-      // so Phaser cannot derive a hit area; skip rather than throw.
-      try {
-        object.setInteractive({ draggable: true, useHandCursor: true });
-      } catch {
+      // An empty container — a sound, say — has nothing to pick up, and asking
+      // for input on it is what produced hitAreaCallback errors on every move.
+      if (!this.makeInteractive(object, { draggable: true, useHandCursor: true })) {
         continue;
       }
-      this.input.setDraggable(object as Phaser.GameObjects.GameObject, true);
+      this.input.setDraggable(object, true);
 
       object.on('pointerdown', () => {
         // Clicking something already chosen keeps the group, so a drag can
@@ -752,16 +747,64 @@ export class GameScene extends Phaser.Scene {
       : this.add.rectangle(0, 0, width, height, fill, alpha);
   }
 
-  private makeTappable(node: GameNode, object: Phaser.GameObjects.GameObject, padX: number, padY: number): void {
-    const shaped = object as Phaser.GameObjects.GameObject & { width?: number; height?: number };
-    const width = (shaped.width || 0) + padX * 2;
-    const height = (shaped.height || 0) + padY * 2;
+  /**
+   * Input, with a hit area Phaser can actually test. Enabling input without one
+   * does not throw — it succeeds, and then dies on the first pointer move with
+   * "hitAreaCallback is not a function", which is a long way from the call that
+   * caused it. A container has no size of its own, so its area comes from what
+   * is inside it, and an empty one gets no input at all: there is nothing there
+   * to hit.
+   *
+   * Returns whether the object ended up interactive.
+   */
+  private makeInteractive(
+    object: Phaser.GameObjects.GameObject,
+    config: Record<string, unknown>,
+    padX = 0,
+    padY = 0
+  ): boolean {
+    const shaped = object as Phaser.GameObjects.GameObject & {
+      width?: number;
+      height?: number;
+      x?: number;
+      y?: number;
+      scaleX?: number;
+      scaleY?: number;
+    };
 
-    if (width > 0 && height > 0) {
-      const hit = new Phaser.Geom.Rectangle(-padX, -padY, width, height);
-      object.setInteractive(hit, Phaser.Geom.Rectangle.Contains);
-    } else {
-      object.setInteractive({ useHandCursor: true });
+    // A texture's hit area is measured from its top-left, whatever its origin.
+    let left = -padX;
+    let top = -padY;
+    let width = (shaped.width || 0) + padX * 2;
+    let height = (shaped.height || 0) + padY * 2;
+
+    if (object instanceof Phaser.GameObjects.Container) {
+      const bounds = object.getBounds();
+      // ponytail: bounds are axis-aligned and world-space, so a rotated group
+      // gets its bounding box rather than its shape. Fine for picking a group up.
+      const scaleX = shaped.scaleX || 1;
+      const scaleY = shaped.scaleY || 1;
+      left = (bounds.x - (shaped.x || 0)) / scaleX - padX;
+      top = (bounds.y - (shaped.y || 0)) / scaleY - padY;
+      width = bounds.width / scaleX + padX * 2;
+      height = bounds.height / scaleY + padY * 2;
+    }
+
+    if (width <= 0 || height <= 0) return false;
+
+    object.setInteractive({
+      ...config,
+      hitArea: new Phaser.Geom.Rectangle(left, top, width, height),
+      hitAreaCallback: Phaser.Geom.Rectangle.Contains
+    });
+    return true;
+  }
+
+  private makeTappable(node: GameNode, object: Phaser.GameObjects.GameObject, padX: number, padY: number): void {
+    if (!this.makeInteractive(object, { useHandCursor: true }, padX, padY)) {
+      // Nothing to tap. Saying so beats a tap rule that silently never fires.
+      console.warn(`[GameScene] "${node.name || node.id}" has nothing to tap`);
+      return;
     }
 
     object.on('pointerdown', () => {
@@ -988,14 +1031,12 @@ export class GameScene extends Phaser.Scene {
 
   private attachDraggable(entry: LiveNode, component: Extract<GameComponent, { type: 'draggable' }>): void {
     const object = entry.object as Phaser.GameObjects.GameObject & {
-      setInteractive: (config?: object) => unknown;
       x?: number;
       y?: number;
     };
 
-    try {
-      object.setInteractive({ draggable: true, useHandCursor: true });
-    } catch {
+    if (!this.makeInteractive(object, { draggable: true, useHandCursor: true })) {
+      console.warn(`[GameScene] "${entry.node.name || entry.node.id}" has nothing to drag`);
       return;
     }
     this.input.setDraggable(object as Phaser.GameObjects.GameObject, true);
@@ -1291,8 +1332,7 @@ export class GameScene extends Phaser.Scene {
    * called, and nothing says why.
    */
   private makeTappableForScript(entry: LiveNode): void {
-    const object = entry.object as Phaser.GameObjects.GameObject & { input?: unknown };
-    if (object.input) return;
+    if (entry.object.input) return;
     this.makeTappable(entry.node, entry.object, 0, 0);
   }
 
