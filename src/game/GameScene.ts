@@ -89,7 +89,8 @@ export class GameScene extends Phaser.Scene {
     snap: boolean;
     lockOnCorrect: boolean;
     allowIncorrect: boolean;
-    filled: boolean;
+    /** The node that filled it, so putting that one piece back frees it. */
+    filledBy?: string;
   }[] = [];
   /** Nodes a spawner uses as prototypes; hidden while playing. */
   private prototypes = new Set<string>();
@@ -537,7 +538,7 @@ export class GameScene extends Phaser.Scene {
           snap: component.snap,
           lockOnCorrect: component.lockOnCorrect,
           allowIncorrect: component.allowIncorrect,
-          filled: false
+          filledBy: undefined
         });
       } else if (SKIPPED_COMPONENTS.indexOf(component.type) !== -1) {
         console.warn(`[GameScene] "${component.type}" on ${node.id} is not interpreted yet`);
@@ -873,7 +874,7 @@ export class GameScene extends Phaser.Scene {
           // Placed is placed. Without this a piece can be pulled out and
           // dropped again, and anything counting correct drops counts it twice.
           this.input.setDraggable(entry.object as Phaser.GameObjects.GameObject, false);
-          zone.filled = true;
+          zone.filledBy = entry.node.id;
         }
         // Both sides hear it: the piece that moved and the slot that received.
         this.fire({ on: 'drop', correct }, entry.node.id);
@@ -905,7 +906,7 @@ export class GameScene extends Phaser.Scene {
     if (!bounds) return undefined;
 
     return this.dropZones.find((zone) => {
-      if (zone.filled) return false;
+      if (zone.filledBy) return false;
       const area = (
         zone.entry.object as Phaser.GameObjects.GameObject & {
           getBounds?: () => Phaser.Geom.Rectangle;
@@ -1111,6 +1112,12 @@ export class GameScene extends Phaser.Scene {
         sdk.install();
         return;
 
+      case 'resetPosition': {
+        const target = this.resolve(action.target, source);
+        if (target) this.resetNode(target);
+        return;
+      }
+
       case 'resetPositions':
         this.resetPositions();
         return;
@@ -1231,18 +1238,25 @@ export class GameScene extends Phaser.Scene {
    * decided separately.
    */
   private resetPositions(): void {
-    for (const entry of Array.from(this.live.values())) {
-      entry.transform = {
-        ...resolveTransform(entry.node.transform, entry.node.overrides, this.orientation)
-      };
-      this.applyTransform(entry);
+    for (const entry of Array.from(this.live.values())) this.resetNode(entry);
+    this.drawSelection();
+  }
 
-      if (entry.node.components.some((component) => component.type === 'draggable')) {
-        this.input.setDraggable(entry.object as Phaser.GameObjects.GameObject, true);
-      }
+  /** One piece home, draggable again, and the slot it filled reopened. */
+  private resetNode(entry: LiveNode): void {
+    entry.transform = {
+      ...resolveTransform(entry.node.transform, entry.node.overrides, this.orientation)
+    };
+    this.applyTransform(entry);
+
+    if (entry.node.components.some((component) => component.type === 'draggable')) {
+      this.input.setDraggable(entry.object as Phaser.GameObjects.GameObject, true);
     }
 
-    for (const zone of this.dropZones) zone.filled = false;
+    for (const zone of this.dropZones) {
+      if (zone.filledBy === entry.node.id) zone.filledBy = undefined;
+    }
+
     this.drawSelection();
   }
 

@@ -149,6 +149,7 @@ export type GameAction =
   | { do: 'setCounter'; key: string; value: number }
   | { do: 'setState'; state: string }
   | { do: 'openCta' }
+  | { do: 'resetPosition'; target?: string }
   | { do: 'resetPositions' }
   | { do: 'shake'; target?: string; intensity: number; duration: number }
   | { do: 'wait'; seconds: number };
