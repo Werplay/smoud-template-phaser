@@ -108,6 +108,13 @@ export class GameScene extends Phaser.Scene {
     allowIncorrect: boolean;
     /** The node that filled it, so putting that one piece back frees it. */
     filledBy?: string;
+    /**
+     * What is sitting here, locked or not. Distinct from filledBy, which means
+     * "locked in place and no longer a target": a zone that merely holds a
+     * piece still accepts another, and a script still needs to know what is in
+     * it — that is what makes a word puzzle scriptable.
+     */
+    holding?: string;
   }[] = [];
   /** Nodes a spawner uses as prototypes; hidden while playing. */
   private prototypes = new Set<string>();
@@ -686,7 +693,8 @@ export class GameScene extends Phaser.Scene {
           snap: component.snap,
           lockOnCorrect: component.lockOnCorrect,
           allowIncorrect: component.allowIncorrect,
-          filledBy: undefined
+          filledBy: undefined,
+          holding: undefined
         });
       } else if (SKIPPED_COMPONENTS.indexOf(component.type) !== -1) {
         console.warn(`[GameScene] "${component.type}" on ${node.id} is not interpreted yet`);
@@ -1068,6 +1076,14 @@ export class GameScene extends Phaser.Scene {
           object.x = target.x;
           object.y = target.y;
         }
+        if (held) {
+          // One slot, one piece: a piece moving here leaves wherever it was.
+          for (const other of this.dropZones) {
+            if (other.holding === entry.node.id) other.holding = undefined;
+          }
+          zone.holding = entry.node.id;
+        }
+
         if (correct && zone.lockOnCorrect) {
           // Placed is placed. Without this a piece can be pulled out and
           // dropped again, and anything counting correct drops counts it twice.
@@ -1284,7 +1300,12 @@ export class GameScene extends Phaser.Scene {
     // a script wants from find('music') is the sound itself.
     const objectFor = (nameOrId: string) => {
       const found = this.findLive(nameOrId);
-      return found?.sound ?? found?.object;
+      if (!found) return undefined;
+      if (found.sound) return found.sound;
+
+      this.describeFill(found);
+      this.attachNodeActions(found);
+      return found.object;
     };
 
     try {
@@ -1339,6 +1360,52 @@ export class GameScene extends Phaser.Scene {
   private makeTappableForScript(entry: LiveNode): void {
     if (entry.object.input) return;
     this.makeTappable(entry.node, entry.object, 0, 0);
+  }
+
+  /**
+   * What is sitting in this drop zone, as the tag it matched on — the currency
+   * a drop zone already deals in, since `accepts` is a list of tags. Reading it
+   * is how a script asks what was spelled, which is the whole of a word puzzle
+   * and cannot be expressed as a behaviour.
+   *
+   * A live getter rather than a value: the answer changes as the game is
+   * played, and a script reads it long after this ran.
+   */
+  private describeFill(entry: LiveNode): void {
+    const target = entry.object as Phaser.GameObjects.GameObject & {
+      filledWith?: string;
+    };
+    if ('filledWith' in target) return;
+
+    Object.defineProperty(target, 'filledWith', {
+      configurable: true,
+      get: () => {
+        const zone = this.dropZones.find((candidate) => candidate.entry === entry);
+        const filler = zone?.holding ? this.live.get(zone.holding) : undefined;
+        if (!filler) return '';
+        return filler.node.tags[0] ?? filler.node.name;
+      }
+    });
+  }
+
+  /**
+   * The two actions a script keeps reaching for. Both already exist as
+   * behaviour actions with a working implementation; there was simply no way to
+   * run one from code, so a script that wanted to shake a tile had to be told
+   * it could not — three separate answers from the copilot tried to call these
+   * before they existed.
+   */
+  private attachNodeActions(entry: LiveNode): void {
+    const target = entry.object as Phaser.GameObjects.GameObject & {
+      shake?: (intensity?: number, duration?: number) => void;
+      resetPosition?: () => void;
+    };
+    if (target.shake) return;
+
+    target.shake = (intensity = 12, duration = 300) => {
+      this.runAction({ do: 'shake', target: entry.node.id, intensity, duration } as GameAction, entry);
+    };
+    target.resetPosition = () => this.resetNode(entry);
   }
 
   private dispatchToScripts(event: Behavior['event'], nodeId?: string, subjectId?: string): void {
@@ -1624,6 +1691,7 @@ export class GameScene extends Phaser.Scene {
 
     for (const zone of this.dropZones) {
       if (zone.filledBy === entry.node.id) zone.filledBy = undefined;
+      if (zone.holding === entry.node.id) zone.holding = undefined;
     }
 
     this.drawSelection();
