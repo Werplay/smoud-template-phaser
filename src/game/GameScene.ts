@@ -1470,6 +1470,8 @@ export class GameScene extends Phaser.Scene {
     const subject =
       event.on === 'counterChange'
         ? { key: event.key, value: this.counters.get(event.key) ?? 0 }
+        : event.on === 'stateEnter'
+        ? event.state
         : subjectId
         ? this.objectOf(subjectId)
         : // A tap names the node it landed on. Without it a scene script
