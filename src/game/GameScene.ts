@@ -1301,10 +1301,17 @@ export class GameScene extends Phaser.Scene {
     const objectFor = (nameOrId: string) => {
       const found = this.findLive(nameOrId);
       if (!found) return undefined;
-      if (found.sound) return found.sound;
+
+      // Only a sound node IS its sound — it draws nothing, so there is no
+      // other object to want. Anything else is a thing on screen that may also
+      // play a sound: a tile with a place-sound is still a tile, and handing
+      // back its sound made find() return something with no x, no filledWith
+      // and no shake().
+      if (found.node.kind === 'sound' && found.sound) return found.sound;
 
       this.describeFill(found);
       this.attachNodeActions(found);
+      this.attachSoundHandle(found);
       return found.object;
     };
 
@@ -1406,6 +1413,16 @@ export class GameScene extends Phaser.Scene {
       this.runAction({ do: 'shake', target: entry.node.id, intensity, duration } as GameAction, entry);
     };
     target.resetPosition = () => this.resetNode(entry);
+  }
+
+  /** Its sound, for a node that has one and is also something on screen. */
+  private attachSoundHandle(entry: LiveNode): void {
+    if (!entry.sound) return;
+    const target = entry.object as Phaser.GameObjects.GameObject & {
+      sound?: Phaser.Sound.BaseSound;
+    };
+    if (target.sound) return;
+    target.sound = entry.sound;
   }
 
   private dispatchToScripts(event: Behavior['event'], nodeId?: string, subjectId?: string): void {
