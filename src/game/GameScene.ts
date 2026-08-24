@@ -1427,7 +1427,16 @@ export class GameScene extends Phaser.Scene {
 
   private dispatchToScripts(event: Behavior['event'], nodeId?: string, subjectId?: string): void {
     if (!this.scriptHandlers.size) return;
-    const subject = subjectId ? this.live.get(subjectId)?.object : undefined;
+
+    // Whatever the event carries, in the handler's first argument: the other
+    // node in a collision or a drop, and for a counter, what it changed to.
+    // Every event that carries something hands it over the same way.
+    const subject =
+      event.on === 'counterChange'
+        ? { key: event.key, value: this.counters.get(event.key) ?? 0 }
+        : subjectId
+        ? this.live.get(subjectId)?.object
+        : undefined;
 
     for (const [owner, handlers] of Array.from(this.scriptHandlers.entries())) {
       // A node's script hears its own events; a scene's script hears the lot,
