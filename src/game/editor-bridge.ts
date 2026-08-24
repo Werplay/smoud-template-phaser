@@ -9,7 +9,7 @@ import type { GameDoc } from './types';
  * bundle is behind — a mismatch used to show up as features silently not
  * working, which is a bad way to learn your browser kept an old copy.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export const EDITOR_MESSAGE = {
   doc: 'game-editor:doc',
@@ -18,7 +18,8 @@ export const EDITOR_MESSAGE = {
   ready: 'game-editor:ready',
   error: 'game-editor:error',
   selected: 'game-editor:selected',
-  moved: 'game-editor:moved'
+  moved: 'game-editor:moved',
+  key: 'game-editor:key'
 } as const;
 
 interface EditorPayload {
@@ -63,6 +64,36 @@ export function installEditorBridge(game: Phaser.Game): void {
     current.setEditorHooks(send);
     hooked = true;
   };
+
+  /**
+   * The editor's shortcuts live on its own window, and an iframe keeps the keys
+   * pressed while it has focus — which is exactly what selecting a node in the
+   * preview gives it. Undo and duplicate simply stopped working after a click
+   * on the canvas, with nothing to suggest why.
+   *
+   * Only the keys the editor claims are forwarded, so a game that reads the
+   * keyboard in play mode still gets everything else.
+   */
+  const WITH_MODIFIER = new Set(['z', 'd']);
+  const ON_THEIR_OWN = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Delete', 'Backspace']);
+
+  window.addEventListener('keydown', (event) => {
+    const modified = event.metaKey || event.ctrlKey;
+    const wanted = modified ? WITH_MODIFIER.has(event.key.toLowerCase()) : ON_THEIR_OWN.has(event.key);
+    if (!wanted) return;
+
+    // Locally too: without this the browser bookmarks the page on cmd-D before
+    // the editor ever hears about it.
+    event.preventDefault();
+    send({
+      type: EDITOR_MESSAGE.key,
+      key: event.key,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey
+    });
+  });
 
   window.addEventListener('error', (event) => report(event.message));
   window.addEventListener('unhandledrejection', (event) => report(String(event.reason)));
