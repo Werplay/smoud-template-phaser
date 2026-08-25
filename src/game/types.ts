@@ -127,7 +127,7 @@ export type Condition =
     }
   | { check: 'state'; state: string };
 
-export type Easing = 'linear' | 'quadIn' | 'quadOut' | 'quadInOut' | 'backOut' | 'bounceOut' | 'elasticOut';
+export type Easing = 'linear' | 'quadIn' | 'quadOut' | 'quadInOut' | 'backOut' | 'bounceOut' | 'elasticOut' | 'custom';
 
 /** Names the other participant in the event that fired. */
 export const OTHER_TARGET = '@other';
@@ -139,6 +139,8 @@ export type GameAction =
       to: Partial<Transform>;
       duration: number;
       easing: Easing;
+      /** x1, y1, x2, y2 of a cubic bezier, used when easing is 'custom'. */
+      curve?: [number, number, number, number];
       repeat: number;
       yoyo: boolean;
     }

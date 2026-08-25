@@ -40,7 +40,7 @@ const MIN_SCALE = 0.05;
 
 const round2 = (value: number): number => Math.round(value * 100) / 100;
 
-const EASING: Record<Easing, string> = {
+const EASING: Record<Exclude<Easing, 'custom'>, string> = {
   linear: 'Linear',
   quadIn: 'Quad.easeIn',
   quadOut: 'Quad.easeOut',
@@ -49,6 +49,51 @@ const EASING: Record<Easing, string> = {
   bounceOut: 'Bounce.easeOut',
   elasticOut: 'Elastic.easeOut'
 };
+
+/**
+ * A cubic bezier as an easing function, the same four numbers CSS takes.
+ *
+ * x is time and y is progress, and the curve is given as x(t), y(t) — so
+ * finding the progress at a moment means solving x(t) = time first. Newton
+ * converges in a couple of steps for the curves a person draws; the bisection
+ * after it is for the ones they draw by accident, where the slope goes flat.
+ */
+function cubicBezier(x1: number, y1: number, x2: number, y2: number): (time: number) => number {
+  const curve = (a: number, b: number, t: number) => {
+    const inverse = 1 - t;
+    return 3 * inverse * inverse * t * a + 3 * inverse * t * t * b + t * t * t;
+  };
+  const slope = (a: number, b: number, t: number) => {
+    const inverse = 1 - t;
+    return 3 * inverse * inverse * a + 6 * inverse * t * (b - a) + 3 * t * t * (1 - b);
+  };
+
+  return (time: number) => {
+    if (time <= 0) return 0;
+    if (time >= 1) return 1;
+
+    let t = time;
+    for (let step = 0; step < 4; step++) {
+      const error = curve(x1, x2, t) - time;
+      if (Math.abs(error) < 1e-4) return curve(y1, y2, t);
+      const derivative = slope(x1, x2, t);
+      if (Math.abs(derivative) < 1e-6) break;
+      t -= error / derivative;
+    }
+
+    let low = 0;
+    let high = 1;
+    t = time;
+    for (let step = 0; step < 20; step++) {
+      const x = curve(x1, x2, t);
+      if (Math.abs(x - time) < 1e-4) break;
+      if (x > time) high = t;
+      else low = t;
+      t = (low + high) / 2;
+    }
+    return curve(y1, y2, t);
+  };
+}
 
 function toColor(hex: string, fallback = 0x000000): number {
   try {
@@ -1336,9 +1381,10 @@ export class GameScene extends Phaser.Scene {
         throw new Error(`There is nothing to animate called "${String(nameOrId)}". ${this.nameList()}`);
       }
 
-      const { duration, easing, repeat, yoyo, ...destination } = to as {
+      const { duration, easing, curve, repeat, yoyo, ...destination } = to as {
         duration?: number;
         easing?: Easing;
+        curve?: [number, number, number, number];
         repeat?: number;
         yoyo?: boolean;
       };
@@ -1347,7 +1393,8 @@ export class GameScene extends Phaser.Scene {
         do: 'tween',
         to: destination as Partial<Transform>,
         duration: duration ?? 300,
-        easing: easing ?? 'quadOut',
+        easing: easing ?? (curve ? 'custom' : 'quadOut'),
+        curve,
         repeat: repeat ?? 0,
         yoyo: yoyo ?? false
       } as Extract<GameAction, { do: 'tween' }>);
@@ -1779,7 +1826,11 @@ export class GameScene extends Phaser.Scene {
       angle: destination.rotation,
       alpha: destination.alpha,
       duration: action.duration,
-      ease: EASING[action.easing] || 'Quad.easeOut',
+      // A drawn curve goes in as a function; a named one as Phaser's own name.
+      ease:
+        action.easing === 'custom'
+          ? cubicBezier(...(action.curve ?? [0.25, 0.1, 0.25, 1]))
+          : EASING[action.easing] || 'Quad.easeOut',
       repeat: action.repeat,
       yoyo: action.yoyo,
       onComplete: () => {
