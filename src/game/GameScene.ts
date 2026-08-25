@@ -1317,6 +1317,42 @@ export class GameScene extends Phaser.Scene {
       handlers.set(event, list);
     };
 
+    /**
+     * Animating from a script, through the same path the tween action takes.
+     *
+     * Not scene.tweens.add: that works in screen pixels, while everything an
+     * author writes is in design space, and a node laid out against an anchor
+     * is not where its x says it is. This converts, and writes the destination
+     * back to the node when it lands, so a later resize keeps the new position
+     * rather than snapping back to the authored one.
+     */
+    const tweenTo = (nameOrId: string | Phaser.GameObjects.GameObject, to: Record<string, unknown> = {}) => {
+      const entry =
+        typeof nameOrId === 'string'
+          ? this.findLive(nameOrId)
+          : Array.from(this.live.values()).find((live) => live.object === nameOrId);
+
+      if (!entry) {
+        throw new Error(`There is nothing to animate called "${String(nameOrId)}". ${this.nameList()}`);
+      }
+
+      const { duration, easing, repeat, yoyo, ...destination } = to as {
+        duration?: number;
+        easing?: Easing;
+        repeat?: number;
+        yoyo?: boolean;
+      };
+
+      this.runTween(entry, {
+        do: 'tween',
+        to: destination as Partial<Transform>,
+        duration: duration ?? 300,
+        easing: easing ?? 'quadOut',
+        repeat: repeat ?? 0,
+        yoyo: yoyo ?? false
+      } as Extract<GameAction, { do: 'tween' }>);
+    };
+
     // A sound node draws nothing, so its container is no use to a script. What
     // a script wants from find('music') is the sound itself.
     const objectFor = (nameOrId: string) => {
@@ -1354,6 +1390,7 @@ export class GameScene extends Phaser.Scene {
         'set',
         'add',
         'find',
+        'tween',
         'goTo',
         'setState',
         'win',
@@ -1369,6 +1406,7 @@ export class GameScene extends Phaser.Scene {
         (key: string, value: number) => this.writeCounter(key, value),
         (key: string, amount: number) => this.writeCounter(key, (this.counters.get(key) ?? 0) + amount),
         objectFor,
+        tweenTo,
         (nameOrId: string) => {
           const scene =
             this.doc.scenes.find((candidate) => candidate.id === nameOrId) ??
