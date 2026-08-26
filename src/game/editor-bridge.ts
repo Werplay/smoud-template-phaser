@@ -9,7 +9,7 @@ import type { GameDoc } from './types';
  * bundle is behind — a mismatch used to show up as features silently not
  * working, which is a bad way to learn your browser kept an old copy.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export const EDITOR_MESSAGE = {
   doc: 'game-editor:doc',
@@ -19,7 +19,8 @@ export const EDITOR_MESSAGE = {
   error: 'game-editor:error',
   selected: 'game-editor:selected',
   moved: 'game-editor:moved',
-  key: 'game-editor:key'
+  key: 'game-editor:key',
+  mute: 'game-editor:mute'
 } as const;
 
 interface EditorPayload {
@@ -33,6 +34,8 @@ interface EditorPayload {
   nodeId?: string | null;
   /** The full selection, when the editor has more than one node chosen. */
   nodeIds?: string[];
+  /** Silences the preview. The author's speakers, not the game's setting. */
+  muted?: boolean;
 }
 
 /**
@@ -125,6 +128,14 @@ export function installEditorBridge(game: Phaser.Game): void {
           scene: payload.scene,
           snap: payload.snap ?? true
         });
+        return;
+      }
+
+      if (payload.type === EDITOR_MESSAGE.mute) {
+        // On the game's sound manager, not the scene's: a restart builds a new
+        // scene and would forget it, and an author who muted the preview to
+        // take a call did not ask to be shouted at again on the next run.
+        game.sound.mute = payload.muted === true;
         return;
       }
 
