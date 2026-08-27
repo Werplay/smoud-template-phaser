@@ -833,8 +833,20 @@ export class GameScene extends Phaser.Scene {
         return this.add.image(0, 0, key, props.frame ?? undefined);
       }
 
+      // Cells, not frames: a texture carries a __BASE entry whether or not it
+      // was ever sliced, so a plain image reports one frame and has none.
+      const cells = this.textures.get(key).frameTotal - 1;
+      if (cells < 2) {
+        // An animation on an unsliced image: the asset lost its frame size, or
+        // nobody gave it one. Draw the picture rather than dying — Phaser hands
+        // out frames that do not exist and throws deep inside its own renderer,
+        // which took the whole scene with it.
+        console.warn(`[GameScene] "${key}" is not cut into frames; ${node.id} cannot animate`);
+        return this.add.image(0, 0, key);
+      }
+
       const sprite = this.add.sprite(0, 0, key, props.animation.from);
-      this.defineAnimation(sprite, node, props.animation);
+      this.defineAnimation(sprite, node, props.animation, cells);
       return sprite;
     }
 
@@ -1329,12 +1341,16 @@ export class GameScene extends Phaser.Scene {
   private defineAnimation(
     sprite: Phaser.GameObjects.Sprite,
     node: GameNode,
-    animation: NonNullable<SpriteProps['animation']>
+    animation: NonNullable<SpriteProps['animation']>,
+    cells: number
   ): void {
     const key = `anim:${node.id}`;
-    const last = this.textures.get(node.props?.assetId as string).frameTotal - 2;
-    const from = Math.max(0, Math.min(animation.from, Math.max(0, last)));
-    const to = Math.max(from, Math.min(animation.to, Math.max(0, last)));
+    // Clamped to what the sheet actually has. A range typed against one cell
+    // size still names frames after it is changed to another, and asking for a
+    // frame that is not there is how this threw in the first place.
+    const last = cells - 1;
+    const from = Math.max(0, Math.min(animation.from, last));
+    const to = Math.max(from, Math.min(animation.to, last));
 
     // Rebuilt on every restart: the range or the speed may have just changed,
     // and Phaser keeps animations on the game rather than the scene.
