@@ -14,7 +14,8 @@ import type {
   GameNode,
   Orientation,
   Outcome,
-  Transform
+  SpriteProps,
+  Transform,
 } from './types';
 
 // Every component type is interpreted; the list is kept so a type added to the
@@ -251,7 +252,19 @@ export class GameScene extends Phaser.Scene {
     // Images arrive as data URIs (embedded at export) or URLs (editor preview);
     // either way the loader has the texture ready before create() places it.
     for (const asset of this.doc.assets) {
-      if (asset.kind === 'image') this.load.image(asset.id, asset.url);
+      if (asset.kind === 'image') {
+        // Sliced at load time, because a texture is loaded once and Phaser
+        // keeps the frame size with it. Two sprites cannot cut the same sheet
+        // differently, which is why the cell size lives on the asset.
+        if (asset.frameWidth && asset.frameHeight) {
+          this.load.spritesheet(asset.id, asset.url, {
+            frameWidth: asset.frameWidth,
+            frameHeight: asset.frameHeight
+          });
+        } else {
+          this.load.image(asset.id, asset.url);
+        }
+      }
       // Through Phaser rather than an Audio element, so a sound is an object a
       // script can hold: play, stop, setVolume, isPlaying. Phaser also waits
       // out the browser's gesture lock for us, which the element did not.
@@ -813,7 +826,16 @@ export class GameScene extends Phaser.Scene {
         console.warn(`[GameScene] missing texture "${key}" for ${node.id}`);
         return undefined;
       }
-      return this.add.image(0, 0, key);
+
+      // A plain picture stays an Image: it is the cheaper object, and most
+      // sprites in a playable never animate.
+      if (!props.animation) {
+        return this.add.image(0, 0, key, props.frame ?? undefined);
+      }
+
+      const sprite = this.add.sprite(0, 0, key, props.animation.from);
+      this.defineAnimation(sprite, node, props.animation);
+      return sprite;
     }
 
     if (node.kind === 'video') {
@@ -1295,6 +1317,39 @@ export class GameScene extends Phaser.Scene {
   // --- layout ---------------------------------------------------------------
 
   /**
+   * One animation per node, named after it.
+   *
+   * Per node rather than per sheet: two sprites can share a texture and run
+   * different ranges of it at different speeds, which is the whole point of
+   * cutting a sheet into more than one animation.
+   *
+   * In edit mode it is defined but never started. An author positioning a
+   * sprite wants to see a frame of it, not a thing that moves while they aim.
+   */
+  private defineAnimation(
+    sprite: Phaser.GameObjects.Sprite,
+    node: GameNode,
+    animation: NonNullable<SpriteProps['animation']>
+  ): void {
+    const key = `anim:${node.id}`;
+    const last = this.textures.get(node.props?.assetId as string).frameTotal - 2;
+    const from = Math.max(0, Math.min(animation.from, Math.max(0, last)));
+    const to = Math.max(from, Math.min(animation.to, Math.max(0, last)));
+
+    // Rebuilt on every restart: the range or the speed may have just changed,
+    // and Phaser keeps animations on the game rather than the scene.
+    if (this.anims.exists(key)) this.anims.remove(key);
+    this.anims.create({
+      key,
+      frames: this.anims.generateFrameNumbers(node.props?.assetId as string, { start: from, end: to }),
+      frameRate: animation.fps,
+      repeat: animation.loop ? -1 : 0
+    });
+
+    if (this.mode === 'play' && animation.autoplay) sprite.play(key);
+  }
+
+  /**
    * The image behind everything.
    *
    * Sized to cover rather than to fit: a background that fits leaves bars, and
@@ -1600,6 +1655,8 @@ export class GameScene extends Phaser.Scene {
     const target = entry.object as Phaser.GameObjects.GameObject & {
       shake?: (intensity?: number, duration?: number) => void;
       resetPosition?: () => void;
+      playAnimation?: () => void;
+      stopAnimation?: () => void;
     };
     if (target.shake) return;
 
@@ -1607,6 +1664,25 @@ export class GameScene extends Phaser.Scene {
       this.runAction({ do: 'shake', target: entry.node.id, intensity, duration } as GameAction, entry);
     };
     target.resetPosition = () => this.resetNode(entry);
+
+    /**
+     * Its own animation, by a name that says what it does.
+     *
+     * Not Phaser's `play(key)`: the key is generated from the node id, so
+     * asking a script to know it would be asking it to know an implementation
+     * detail. A sprite that has no animation gets the methods anyway and they
+     * do nothing, which is a better answer than a script that throws because
+     * an author has not cut the sheet yet.
+     */
+    const sprite = entry.object as Phaser.GameObjects.Sprite;
+    target.playAnimation = () => {
+      if (sprite.anims && this.anims.exists(`anim:${entry.node.id}`)) {
+        sprite.play(`anim:${entry.node.id}`, true);
+      }
+    };
+    target.stopAnimation = () => {
+      if (sprite.anims) sprite.stop();
+    };
   }
 
   /** Its sound, for a node that has one and is also something on screen. */
@@ -1849,6 +1925,18 @@ export class GameScene extends Phaser.Scene {
           (target.transform as unknown as Record<string, unknown>)[action.key] = action.value;
           this.applyTransform(target);
         }
+        return;
+      }
+
+      case 'playAnimation':
+      case 'stopAnimation': {
+        const target = this.resolve(action.target, source, subjectId);
+        // Only a Sprite has animations; an Image is the plain-picture case and
+        // has nothing to run, so this is a no-op rather than a crash.
+        const sprite = target?.object as Phaser.GameObjects.Sprite | undefined;
+        if (!sprite?.anims) return;
+        if (action.do === 'playAnimation') sprite.play(`anim:${target!.node.id}`, true);
+        else sprite.stop();
         return;
       }
 

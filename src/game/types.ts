@@ -53,8 +53,20 @@ export interface VideoProps {
   autoplay: boolean;
 }
 
+export interface GameAnimation {
+  from: number;
+  to: number;
+  fps: number;
+  loop: boolean;
+  autoplay: boolean;
+}
+
 export interface SpriteProps {
   assetId: string;
+  /** Which cell of a sliced sheet to draw. */
+  frame?: number;
+  /** Set when this sprite plays rather than sits. */
+  animation?: GameAnimation;
 }
 
 export interface TextProps {
@@ -157,6 +169,8 @@ export type GameAction =
   | { do: 'destroy'; target?: string }
   | { do: 'spawn'; target?: string }
   | { do: 'playSound'; assetId: string }
+  | { do: 'playAnimation'; target?: string; targetTag?: string }
+  | { do: 'stopAnimation'; target?: string; targetTag?: string }
   | { do: 'addToCounter'; key: string; amount: number }
   | { do: 'setCounter'; key: string; value: number }
   | { do: 'setState'; state: string }
@@ -197,6 +211,9 @@ export interface GameAsset {
   bytes: number;
   width?: number;
   height?: number;
+  /** A sheet's cell size: the texture is loaded once and sliced once. */
+  frameWidth?: number;
+  frameHeight?: number;
 }
 
 export interface GameSceneData {
