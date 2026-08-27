@@ -18,6 +18,7 @@
   ],
   "author": "Smoud",
   "dependencies": {
+    "@esotericsoftware/spine-phaser": "^4.1.56",
     "@smoud/playable-sdk": "^1.0.24",
     "phaser": "^3.88.2"
   },

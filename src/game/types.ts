@@ -44,7 +44,23 @@ export interface TransformOverrides {
   landscape?: Partial<Transform>;
 }
 
-export type NodeKind = 'container' | 'sprite' | 'text' | 'shape' | 'sound' | 'video';
+export type NodeKind =
+  | 'container'
+  | 'sprite'
+  | 'text'
+  | 'shape'
+  | 'sound'
+  | 'video'
+  | 'spine';
+
+export interface SpineProps {
+  assetId: string;
+  animation: string;
+  loop: boolean;
+  skin: string;
+  timeScale: number;
+  mix: number;
+}
 
 export interface VideoProps {
   assetId: string;
@@ -86,7 +102,9 @@ export interface ShapeProps {
   fillAlpha: number;
 }
 
-export type NodeProps = Partial<SpriteProps & TextProps & ShapeProps & VideoProps>;
+export type NodeProps = Partial<
+  SpriteProps & TextProps & ShapeProps & VideoProps & SpineProps
+>;
 
 export type GameComponent =
   | { type: 'tappable'; paddingX: number; paddingY: number; enabled: boolean }
@@ -210,7 +228,7 @@ export interface GameNode {
 
 export interface GameAsset {
   id: string;
-  kind: 'image' | 'audio' | 'font' | 'video';
+  kind: 'image' | 'audio' | 'font' | 'video' | 'spine';
   url: string;
   bytes: number;
   width?: number;
@@ -218,6 +236,9 @@ export interface GameAsset {
   /** A sheet's cell size: the texture is loaded once and sliced once. */
   frameWidth?: number;
   frameHeight?: number;
+  /** A Spine skeleton's other parts; `url` holds the skeleton JSON. */
+  atlasUrl?: string;
+  pages?: { name: string; url: string }[];
 }
 
 export interface GameSceneData {

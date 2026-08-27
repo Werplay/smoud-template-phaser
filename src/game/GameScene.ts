@@ -38,6 +38,24 @@ const HANDLE_RADIUS = 7;
 const ROTATE_ARM_LENGTH = 28;
 /** The box drawn for a node that has no size — an empty group, so far. */
 const EMPTY_SELECTION_SIZE = 48;
+
+/**
+ * As much of a Spine object as this scene touches. The real type lives in the
+ * plugin package, which an export without a skeleton in it does not carry.
+ */
+interface SpineLike {
+  skeleton: {
+    setSkinByName: (name: string) => void;
+    setSlotsToSetupPose: () => void;
+    data: { animations: { name: string }[]; skins: { name: string }[] };
+  };
+  animationState: {
+    timeScale: number;
+    data: { defaultMix: number };
+    setAnimation: (track: number, name: string, loop: boolean) => unknown;
+    setEmptyAnimation: (track: number, mix: number) => unknown;
+  };
+}
 /**
  * Where an overlay's depth starts, above anything a scene is likely to use and
  * below the editor's own handles at 10,000.
@@ -282,6 +300,30 @@ export class GameScene extends Phaser.Scene {
       // it is heard is the node's business, and it is muted unless asked.
       if (asset.kind === 'video') {
         this.load.video(asset.id, this.loadableMediaUrl(asset.url), false);
+      }
+
+      /**
+       * A Spine skeleton: three files that only mean anything together.
+       *
+       * The pages go first and under the key the atlas will look for —
+       * `<atlasKey>!<page name>`. The plugin loads pages itself by resolving
+       * their names against the atlas file's own URL, which is nothing at all
+       * when the atlas arrives as a data URI in an exported playable; loading
+       * them here means it finds them already there and skips that entirely.
+       */
+      if (asset.kind === 'spine' && asset.atlasUrl) {
+        const atlasKey = `${asset.id}-atlas`;
+        for (const page of asset.pages ?? []) {
+          this.load.image(`${atlasKey}!${page.name}`, page.url);
+        }
+        const loader = this.load as unknown as {
+          spineAtlas?: (key: string, url: string) => void;
+          spineJson?: (key: string, url: string) => void;
+        };
+        // Absent unless the build carries the plugin, and a project with a
+        // skeleton in it always does.
+        loader.spineAtlas?.(atlasKey, asset.atlasUrl);
+        loader.spineJson?.(asset.id, asset.url);
       }
     }
   }
@@ -959,6 +1001,44 @@ export class GameScene extends Phaser.Scene {
         video.play(this.mode === 'edit' ? true : loop);
       }
       return video;
+    }
+
+    if (node.kind === 'spine') {
+      const key = props.assetId;
+      const factory = this.add as unknown as {
+        spine?: (x: number, y: number, data: string, atlas: string) => SpineLike;
+      };
+      if (!key || !factory.spine || !this.cache.json.exists(key)) {
+        console.warn(`[GameScene] missing spine skeleton "${key}" for ${node.id}`);
+        return undefined;
+      }
+
+      const spineObject = factory.spine(0, 0, key, `${key}-atlas`);
+
+      // Before the animation, because a skin swap restarts what is showing.
+      if (props.skin) {
+        try {
+          spineObject.skeleton.setSkinByName(props.skin);
+          spineObject.skeleton.setSlotsToSetupPose();
+        } catch {
+          console.warn(`[GameScene] "${node.id}" has no skin called "${props.skin}"`);
+        }
+      }
+
+      if (props.mix) spineObject.animationState.data.defaultMix = props.mix;
+      spineObject.animationState.timeScale = props.timeScale ?? 1;
+
+      // In edit mode the setup pose, not the animation: an author positioning a
+      // character wants it to hold still while they aim at it.
+      if (this.mode === 'play' && props.animation) {
+        try {
+          spineObject.animationState.setAnimation(0, props.animation, props.loop !== false);
+        } catch {
+          console.warn(`[GameScene] "${node.id}" has no animation called "${props.animation}"`);
+        }
+      }
+
+      return spineObject as unknown as Phaser.GameObjects.GameObject;
     }
 
     if (node.kind === 'text') {

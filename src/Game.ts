@@ -1,6 +1,7 @@
 import * as Phaser from 'phaser';
 import { GAME_DATA } from './game-data';
 import { GameScene } from './game/GameScene';
+import { SPINE_PLUGIN } from './game/spine-plugin';
 
 export class Game extends Phaser.Game {
   constructor(width: number, height: number) {
@@ -26,7 +27,21 @@ export class Game extends Phaser.Game {
           debug: false
         }
       },
-      scene: GameScene
+      scene: GameScene,
+      // Registered only when the build carries it, which is per project.
+      ...(SPINE_PLUGIN
+        ? {
+            plugins: {
+              scene: [
+                {
+                  key: 'spine.SpinePlugin',
+                  plugin: SPINE_PLUGIN,
+                  mapping: 'spine'
+                }
+              ]
+            }
+          }
+        : {})
     });
   }
 
