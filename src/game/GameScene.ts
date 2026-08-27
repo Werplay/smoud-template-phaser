@@ -235,6 +235,19 @@ export class GameScene extends Phaser.Scene {
   }
 
   preload(): void {
+    /**
+     * Asked for with CORS, because a video is drawn from the element itself.
+     *
+     * Images never needed this: Phaser fetches them over XHR and hands WebGL a
+     * blob, which is same-origin whatever it came from. A video goes straight
+     * onto a <video> element, and an element holding another origin's bytes
+     * taints the canvas — texImage2D then throws SecurityError and the whole
+     * scene stops, which is what an editor preview did with a video on it. The
+     * preview runs on an opaque origin, so every URL is another origin's,
+     * including our own.
+     */
+    this.load.crossOrigin = 'anonymous';
+
     // Images arrive as data URIs (embedded at export) or URLs (editor preview);
     // either way the loader has the texture ready before create() places it.
     for (const asset of this.doc.assets) {
