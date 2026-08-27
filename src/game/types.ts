@@ -44,7 +44,14 @@ export interface TransformOverrides {
   landscape?: Partial<Transform>;
 }
 
-export type NodeKind = 'container' | 'sprite' | 'text' | 'shape' | 'sound';
+export type NodeKind = 'container' | 'sprite' | 'text' | 'shape' | 'sound' | 'video';
+
+export interface VideoProps {
+  assetId: string;
+  loop: boolean;
+  muted: boolean;
+  autoplay: boolean;
+}
 
 export interface SpriteProps {
   assetId: string;
@@ -67,7 +74,7 @@ export interface ShapeProps {
   fillAlpha: number;
 }
 
-export type NodeProps = Partial<SpriteProps & TextProps & ShapeProps>;
+export type NodeProps = Partial<SpriteProps & TextProps & ShapeProps & VideoProps>;
 
 export type GameComponent =
   | { type: 'tappable'; paddingX: number; paddingY: number; enabled: boolean }
@@ -185,7 +192,7 @@ export interface GameNode {
 
 export interface GameAsset {
   id: string;
-  kind: 'image' | 'audio' | 'font';
+  kind: 'image' | 'audio' | 'font' | 'video';
   url: string;
   bytes: number;
   width?: number;
@@ -205,6 +212,8 @@ export interface GameSettings {
   designHeight: number;
   orientations: Orientation[];
   backgroundColor: string;
+  /** An asset id: an image drawn behind everything, on top of the colour. */
+  backgroundImageId?: string;
   gravityY: number;
   physicsDebug: boolean;
   storeUrls: { android?: string; ios?: string };

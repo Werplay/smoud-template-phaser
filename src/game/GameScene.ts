@@ -188,6 +188,10 @@ export class GameScene extends Phaser.Scene {
   private scriptErrors = new Set<string>();
   /** Blob URLs made for embedded audio, released when the run ends. */
   private blobUrls: string[] = [];
+  /** Every video built this run, so a restart does not leave one playing. */
+  private videos: Phaser.GameObjects.Video[] = [];
+  /** The image behind everything, when the project has one. */
+  private background?: Phaser.GameObjects.Image;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -226,6 +230,7 @@ export class GameScene extends Phaser.Scene {
     this.timers = [];
     this.dropZones = [];
     this.prototypes = new Set();
+    this.videos = [];
     this.aliveBySpawner = new Map();
   }
 
@@ -238,7 +243,12 @@ export class GameScene extends Phaser.Scene {
       // script can hold: play, stop, setVolume, isPlaying. Phaser also waits
       // out the browser's gesture lock for us, which the element did not.
       if (asset.kind === 'audio') {
-        this.load.audio(asset.id, this.loadableAudioUrl(asset.url));
+        this.load.audio(asset.id, this.loadableMediaUrl(asset.url));
+      }
+      // noAudio: false, because a video node can carry its own sound. Whether
+      // it is heard is the node's business, and it is muted unless asked.
+      if (asset.kind === 'video') {
+        this.load.video(asset.id, this.loadableMediaUrl(asset.url), false);
       }
     }
   }
@@ -246,6 +256,7 @@ export class GameScene extends Phaser.Scene {
   create(): void {
     this.orientation = orientationOf(this.viewport());
     this.cameras.main.setBackgroundColor(this.doc.settings.backgroundColor);
+    this.paintBackground();
 
     this.seedCounters();
 
@@ -792,6 +803,31 @@ export class GameScene extends Phaser.Scene {
       return this.add.image(0, 0, key);
     }
 
+    if (node.kind === 'video') {
+      const key = props.assetId;
+      if (!key || !this.cache.video.exists(key)) {
+        console.warn(`[GameScene] missing video "${key}" for ${node.id}`);
+        return undefined;
+      }
+
+      const video = this.add.video(0, 0, key);
+      this.videos.push(video);
+
+      // Muted while editing whatever the node says, and played anyway: a still
+      // black rectangle is not a picture of what this node is, and nobody
+      // arranging a scene asked to be talked at by it.
+      const muted = this.mode === 'edit' ? true : props.muted !== false;
+      const loop = props.loop === true;
+      video.setMute(muted);
+
+      if (this.mode === 'edit' || props.autoplay !== false) {
+        // A browser refuses to autoplay anything audible, and refuses quietly:
+        // the video simply never starts, which reads as a broken asset.
+        video.play(this.mode === 'edit' ? true : loop);
+      }
+      return video;
+    }
+
     if (node.kind === 'text') {
       return this.add.text(0, 0, this.resolveText(node), {
         fontFamily: props.fontFamily || 'sans-serif',
@@ -1245,7 +1281,35 @@ export class GameScene extends Phaser.Scene {
 
   // --- layout ---------------------------------------------------------------
 
+  /**
+   * The image behind everything.
+   *
+   * Sized to cover rather than to fit: a background that fits leaves bars, and
+   * a playable is shown at whatever shape the network's frame happens to be.
+   * The colour underneath still matters — it is what shows through a
+   * transparent PNG, and what is there before the texture arrives.
+   */
+  private paintBackground(): void {
+    const key = this.doc.settings.backgroundImageId;
+    if (!key || !this.textures.exists(key)) return;
+
+    this.background = this.add.image(0, 0, key).setDepth(-10_000).setScrollFactor(0);
+    this.fitBackground();
+  }
+
+  private fitBackground(): void {
+    if (!this.background) return;
+
+    const { width, height } = this.viewport();
+    const source = this.background.texture.getSourceImage();
+    const scale = Math.max(width / source.width, height / source.height);
+
+    this.background.setPosition(width / 2, height / 2).setScale(scale);
+  }
+
   private relayout = (): void => {
+    this.fitBackground();
+
     const orientation = orientationOf(this.viewport());
     const rotated = orientation !== this.orientation;
     this.orientation = orientation;
@@ -1951,7 +2015,7 @@ export class GameScene extends Phaser.Scene {
    * URIs, so this is the shipped case, not an edge one. A blob URL is the same
    * bytes at an address the loader can read.
    */
-  private loadableAudioUrl(url: string): string {
+  private loadableMediaUrl(url: string): string {
     if (!url.startsWith('data:')) return url;
 
     const comma = url.indexOf(',');
@@ -2013,6 +2077,10 @@ export class GameScene extends Phaser.Scene {
   private teardown(): void {
     this.scale.off('resize', this.relayout, this);
     this.sound.stopAll();
+    // A video keeps a media element playing after the scene that made it is
+    // gone: the same leak the sounds had, and this one is audible and visible.
+    for (const video of this.videos) video.stop();
+    this.videos = [];
     for (const url of this.blobUrls) URL.revokeObjectURL(url);
     this.blobUrls = [];
   }
