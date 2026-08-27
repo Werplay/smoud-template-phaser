@@ -331,6 +331,9 @@ export class GameScene extends Phaser.Scene {
       // for control of the thing they are trying to position.
       this.runScripts();
       this.fire({ on: 'start' });
+      // The scene a run opens on has started too, and a handler written on it
+      // should not have to be written twice to hear that.
+      this.fireSceneStart(this.visibleScene);
     }
 
     sdk.start();
@@ -1575,6 +1578,43 @@ export class GameScene extends Phaser.Scene {
   // --- behaviours -----------------------------------------------------------
 
   /** Run every behaviour whose event matches, optionally limited to one node. */
+  /**
+   * Told to one scene's own things, and nothing else.
+   *
+   * fire() sends an event to everything alive; this one is about a particular
+   * screen arriving, so it goes only to what is on it. The same handler
+   * written on two scenes therefore runs once for each, when each opens —
+   * which is the whole point of asking for it per scene rather than per game.
+   *
+   * A node's script belongs to the scene the node is on; a scene's script to
+   * the scene it is written on.
+   */
+  private fireSceneStart(sceneId: string): void {
+    if (this.mode !== 'play') return;
+
+    const event = { on: 'sceneStart' } as const;
+    const scene = this.doc.scenes.find((candidate) => candidate.id === sceneId);
+    const label = scene?.name || sceneId;
+
+    for (const entry of Array.from(this.live.values())) {
+      if (entry.sceneId !== sceneId) continue;
+      for (const behavior of entry.node.behaviors) {
+        if (!this.eventMatches(behavior.event, event)) continue;
+        if (!behavior.conditions.every((condition) => this.conditionHolds(condition))) continue;
+        this.runActions(behavior, entry);
+      }
+    }
+
+    for (const [owner, handlers] of Array.from(this.scriptHandlers.entries())) {
+      const ownerScene = owner.startsWith('scene:')
+        ? owner.slice('scene:'.length)
+        : this.live.get(owner)?.sceneId;
+      if (ownerScene !== sceneId) continue;
+
+      this.callHandlers(owner, handlers.get('sceneStart'), label, event);
+    }
+  }
+
   private fire(event: Behavior['event'], nodeId?: string, subjectId?: string): void {
     for (const entry of Array.from(this.live.values())) {
       if (nodeId && entry.node.id !== nodeId) continue;
@@ -2282,6 +2322,9 @@ export class GameScene extends Phaser.Scene {
     this.visibleScene = sceneId;
     for (const entry of Array.from(this.live.values())) this.applyTransform(entry);
     this.drawSelection();
+    // After it is on screen, so a handler that measures something measures the
+    // scene it is on rather than the one it replaced.
+    this.fireSceneStart(sceneId);
   }
 
   private setVisible(nodeId: string, visible: boolean): void {
