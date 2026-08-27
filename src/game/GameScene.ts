@@ -904,6 +904,34 @@ export class GameScene extends Phaser.Scene {
       const video = this.add.video(0, 0, key);
       this.videos.push(video);
 
+      /**
+       * Measured again when the video says how big it is.
+       *
+       * Phaser gives a video a 256x256 placeholder texture until its first
+       * frame arrives, and everything sized before that is sized against the
+       * placeholder: a real clip is larger, so its tap area came out a patch in
+       * one corner. Reported as a video that could only be selected by
+       * clicking its first quadrant.
+       */
+      video.once(Phaser.GameObjects.Events.VIDEO_CREATED, () => {
+        const entry = this.live.get(node.id);
+        if (!entry) return;
+
+        const area = (video.input?.hitArea ?? null) as Phaser.Geom.Rectangle | null;
+        if (area instanceof Phaser.Geom.Rectangle) {
+          // The rectangle was built as (-padX, -padY, w + 2padX, h + 2padY), so
+          // its own corner says what the padding was — a tap area widened for
+          // thumbs stays widened.
+          const padX = -area.x;
+          const padY = -area.y;
+          area.setTo(-padX, -padY, video.width + padX * 2, video.height + padY * 2);
+        }
+
+        // Origin is a fraction of the size, so it was wrong for the same reason.
+        this.applyTransform(entry);
+        this.drawSelection();
+      });
+
       // Muted while editing whatever the node says, and played anyway: a still
       // black rectangle is not a picture of what this node is, and nobody
       // arranging a scene asked to be talked at by it.
@@ -1496,12 +1524,21 @@ export class GameScene extends Phaser.Scene {
     };
 
     if (!simulating) setters.setPosition?.(placement.x, placement.y);
-    // The original, never the handle a script was given: that one calls back
-    // into here, and the pair recursed until the stack ran out.
-    (setters.nativeSetScale ?? setters.setScale)?.(
-      placement.scaleX,
-      placement.scaleY,
-    );
+    /**
+     * Called against the object, not as a bare function.
+     *
+     * `setters.setScale?.(x, y)` passes the object as `this`; wrapping the
+     * choice in parentheses — `(a ?? b)?.(x, y)` — does not. Phaser's setScale
+     * then ran with no receiver and set nothing, on code the build does not
+     * put in strict mode, so it failed in complete silence: the document took
+     * the new scale, the picture never changed, and moving a node still worked
+     * because setPosition below kept its receiver.
+     *
+     * The original rather than the handle a script was given: that one calls
+     * back into here, and the pair recursed until the stack ran out.
+     */
+    const applyScale = setters.nativeSetScale ?? setters.setScale;
+    applyScale?.call(object, placement.scaleX, placement.scaleY);
     setters.setAngle?.(transform.rotation);
     setters.setAlpha?.(transform.alpha);
     setters.setDepth?.(transform.depth);
