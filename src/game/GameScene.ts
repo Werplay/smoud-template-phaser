@@ -1432,6 +1432,8 @@ export class GameScene extends Phaser.Scene {
     const setters = object as unknown as {
       setPosition?: (x: number, y: number) => void;
       setScale?: (x: number, y: number) => void;
+      /** Phaser's own, stashed before a script's handle shadowed it. */
+      nativeSetScale?: (x: number, y: number) => void;
       setAngle?: (deg: number) => void;
       setAlpha?: (a: number) => void;
       setDepth?: (d: number) => void;
@@ -1440,7 +1442,12 @@ export class GameScene extends Phaser.Scene {
     };
 
     if (!simulating) setters.setPosition?.(placement.x, placement.y);
-    setters.setScale?.(placement.scaleX, placement.scaleY);
+    // The original, never the handle a script was given: that one calls back
+    // into here, and the pair recursed until the stack ran out.
+    (setters.nativeSetScale ?? setters.setScale)?.(
+      placement.scaleX,
+      placement.scaleY,
+    );
     setters.setAngle?.(transform.rotation);
     setters.setAlpha?.(transform.alpha);
     setters.setDepth?.(transform.depth);
@@ -1673,6 +1680,8 @@ export class GameScene extends Phaser.Scene {
       resetPosition?: () => void;
       playAnimation?: () => void;
       stopAnimation?: () => void;
+      setDisplaySize?: (width: number, height: number) => unknown;
+      setScale?: (x: number, y?: number) => unknown;
     };
     if (target.shake) return;
 
@@ -1680,6 +1689,53 @@ export class GameScene extends Phaser.Scene {
       this.runAction({ do: 'shake', target: entry.node.id, intensity, duration } as GameAction, entry);
     };
     target.resetPosition = () => this.resetNode(entry);
+
+    /**
+     * Sizing that survives a rotation.
+     *
+     * Phaser's own setDisplaySize and setScale change the object; this scene's
+     * layout re-applies the authored transform on every resize, so a script
+     * that used them watched its work vanish the moment a device turned — the
+     * node came back at the size the panel says it is. Measured: a sprite told
+     * to be 200x200 was 269x67 again after one rotation.
+     *
+     * Writing the authored scale instead means the intent is re-applied rather
+     * than overwritten, and a root node still gets the screen-fit factor that
+     * anchoring depends on.
+     */
+    const sized = entry.object as unknown as { width?: number; height?: number };
+    target.setDisplaySize = (width: number, height: number) => {
+      const naturalWidth = sized.width || 0;
+      const naturalHeight = sized.height || 0;
+      // A container has no size of its own; there is nothing to scale against,
+      // so this falls back to Phaser's behaviour rather than dividing by zero.
+      if (naturalWidth > 0 && naturalHeight > 0) {
+        entry.transform.scaleX = width / naturalWidth;
+        entry.transform.scaleY = height / naturalHeight;
+        this.applyTransform(entry);
+      }
+      return entry.object;
+    };
+
+    /**
+     * Phaser's own, kept before it is shadowed.
+     *
+     * applyTransform writes the authored scale through setScale, and the
+     * override below calls applyTransform — so without keeping the original
+     * the two called each other until the stack ran out. Which they did.
+     */
+    const native = entry.object as unknown as {
+      setScale: (x: number, y?: number) => unknown;
+      nativeSetScale?: (x: number, y?: number) => unknown;
+    };
+    native.nativeSetScale = native.setScale.bind(entry.object);
+
+    target.setScale = (x: number, y = x) => {
+      entry.transform.scaleX = x;
+      entry.transform.scaleY = y;
+      this.applyTransform(entry);
+      return entry.object;
+    };
 
     /**
      * Its own animation, by a name that says what it does.
