@@ -1933,8 +1933,9 @@ export class GameScene extends Phaser.Scene {
     const target = entry.object as Phaser.GameObjects.GameObject & {
       shake?: (intensity?: number, duration?: number) => void;
       resetPosition?: () => void;
-      playAnimation?: () => void;
+      playAnimation?: (name?: string, loop?: boolean) => void;
       stopAnimation?: () => void;
+      setSkin?: (name: string) => void;
       setDisplaySize?: (width: number, height: number) => unknown;
       setScale?: (x: number, y?: number) => unknown;
     };
@@ -2023,13 +2024,57 @@ export class GameScene extends Phaser.Scene {
      * an author has not cut the sheet yet.
      */
     const sprite = entry.object as Phaser.GameObjects.Sprite;
-    target.playAnimation = () => {
+    const skeleton = entry.node.kind === 'spine'
+      ? (entry.object as unknown as SpineLike)
+      : undefined;
+
+    target.playAnimation = (name?: string, loop?: boolean) => {
+      /**
+       * One name for two things that mean the same to an author.
+       *
+       * A sheet's animation is set up when the node is built and has no name of
+       * its own; a skeleton's is one of several it carries. Asking someone to
+       * remember which kind of node they are holding would be asking them to
+       * remember an implementation detail.
+       */
+      if (skeleton) {
+        const wanted = name ?? (entry.node.props as { animation?: string })?.animation;
+        if (!wanted) return;
+        try {
+          skeleton.animationState.setAnimation(
+            0,
+            wanted,
+            loop ?? (entry.node.props as { loop?: boolean })?.loop !== false
+          );
+        } catch {
+          console.warn(`[GameScene] "${entry.node.name}" has no animation called "${wanted}"`);
+        }
+        return;
+      }
+
       if (sprite.anims && this.anims.exists(`anim:${entry.node.id}`)) {
         sprite.play(`anim:${entry.node.id}`, true);
       }
     };
+
     target.stopAnimation = () => {
+      // Emptying the track rather than freezing it: a skeleton with nothing on
+      // track zero returns to its setup pose, which is what stopping looks like.
+      if (skeleton) {
+        skeleton.animationState.setEmptyAnimation(0, 0);
+        return;
+      }
       if (sprite.anims) sprite.stop();
+    };
+
+    target.setSkin = (name: string) => {
+      if (!skeleton) return;
+      try {
+        skeleton.skeleton.setSkinByName(name);
+        skeleton.skeleton.setSlotsToSetupPose();
+      } catch {
+        console.warn(`[GameScene] "${entry.node.name}" has no skin called "${name}"`);
+      }
     };
   }
 
@@ -2304,12 +2349,17 @@ export class GameScene extends Phaser.Scene {
       case 'playAnimation':
       case 'stopAnimation': {
         const target = this.resolve(action.target, source, subjectId);
-        // Only a Sprite has animations; an Image is the plain-picture case and
-        // has nothing to run, so this is a no-op rather than a crash.
-        const sprite = target?.object as Phaser.GameObjects.Sprite | undefined;
-        if (!sprite?.anims) return;
-        if (action.do === 'playAnimation') sprite.play(`anim:${target!.node.id}`, true);
-        else sprite.stop();
+        if (!target) return;
+
+        // Through the same handle a script uses, so a sheet and a skeleton
+        // answer one action rather than two.
+        this.attachNodeActions(target);
+        const handle = target.object as Phaser.GameObjects.GameObject & {
+          playAnimation?: () => void;
+          stopAnimation?: () => void;
+        };
+        if (action.do === 'playAnimation') handle.playAnimation?.();
+        else handle.stopAnimation?.();
         return;
       }
 
