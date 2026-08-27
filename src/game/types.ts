@@ -134,7 +134,8 @@ export type GameEvent =
   | { on: 'spawn' }
   | { on: 'leaveBounds' }
   | { on: 'counterChange'; key: string }
-  | { on: 'stateEnter'; state: string };
+  | { on: 'stateEnter'; state: string }
+  | { on: 'resize' };
 
 export type Condition =
   | {

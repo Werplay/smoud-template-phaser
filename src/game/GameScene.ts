@@ -1,7 +1,7 @@
 import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { getDoc } from './doc-source';
-import { orientationOf, resolveTransform, rootOffsetFromScreen, rootPlacement, type Size } from './layout';
+import { layoutScale, orientationOf, resolveTransform, rootOffsetFromScreen, rootPlacement, type Size } from './layout';
 import { type Guide, type Rect, rectOf, snap } from './snapping';
 import { OTHER_TARGET } from './types';
 import type {
@@ -1415,6 +1415,16 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.drawSelection();
+
+    /**
+     * Told after everything has been re-placed, not before.
+     *
+     * Layout looks after the nodes the panels positioned. A script that sized
+     * something itself has no such rule — setDisplaySize is a measurement, and
+     * a full-screen overlay measured once is the size the screen used to be.
+     * This is the moment to measure again.
+     */
+    if (this.mode === 'play') this.fire({ on: 'resize' });
   };
 
   private applyTransform(entry: LiveNode): void {
@@ -1709,11 +1719,32 @@ export class GameScene extends Phaser.Scene {
       const naturalHeight = sized.height || 0;
       // A container has no size of its own; there is nothing to scale against,
       // so this falls back to Phaser's behaviour rather than dividing by zero.
-      if (naturalWidth > 0 && naturalHeight > 0) {
-        entry.transform.scaleX = width / naturalWidth;
-        entry.transform.scaleY = height / naturalHeight;
-        this.applyTransform(entry);
-      }
+      if (naturalWidth <= 0 || naturalHeight <= 0) return entry.object;
+
+      /**
+       * Divided back out, so the number means what its name says.
+       *
+       * A root node's authored scale is multiplied by the screen-fit factor
+       * when it is placed. Storing width/natural therefore asked for
+       * width * factor pixels — and in an editor preview, where the frame is
+       * smaller than the design canvas, that factor is well under one:
+       * setDisplaySize(screenWidth, screenHeight) produced an image less than
+       * half the screen. Which is how this was reported.
+       */
+      const fit = entry.isRoot
+        ? layoutScale(
+            entry.transform.fit,
+            {
+              width: this.doc.settings.designWidth,
+              height: this.doc.settings.designHeight
+            },
+            this.viewport()
+          )
+        : { sx: 1, sy: 1 };
+
+      entry.transform.scaleX = width / (naturalWidth * (fit.sx || 1));
+      entry.transform.scaleY = height / (naturalHeight * (fit.sy || 1));
+      this.applyTransform(entry);
       return entry.object;
     };
 
@@ -1785,6 +1816,9 @@ export class GameScene extends Phaser.Scene {
     const subject =
       event.on === 'counterChange'
         ? { key: event.key, value: this.counters.get(event.key) ?? 0 }
+        // The new size, so a handler does not have to go and ask for it.
+        : event.on === 'resize'
+        ? this.viewport()
         : event.on === 'stateEnter'
         ? event.state
         : subjectId
