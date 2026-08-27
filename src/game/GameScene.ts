@@ -36,6 +36,8 @@ const SELECTION_COLOR = 0xb8ff3c;
 const GUIDE_COLOR = 0x3de8ff;
 const HANDLE_RADIUS = 7;
 const ROTATE_ARM_LENGTH = 28;
+/** The box drawn for a node that has no size — an empty group, so far. */
+const EMPTY_SELECTION_SIZE = 48;
 /** A node can be shrunk but not inverted or vanished by a corner drag. */
 const MIN_SCALE = 0.05;
 
@@ -542,13 +544,28 @@ export class GameScene extends Phaser.Scene {
     // Containers have no display size of their own; their bounds come from
     // what is inside them, and those are never rotated as a unit here.
     const bounds = object.getBounds?.();
-    if (!bounds || !bounds.width || !bounds.height) return undefined;
+    if (bounds && bounds.width && bounds.height) {
+      return {
+        center: { x: bounds.centerX, y: bounds.centerY },
+        halfW: bounds.width / 2,
+        halfH: bounds.height / 2,
+        angle: 0
+      };
+    }
 
+    /**
+     * A stand-in box for something with no size at all.
+     *
+     * An empty group is a real node in a real place, and selecting one used to
+     * draw nothing whatsoever: no outline, no handles, no sign the click had
+     * landed. Reported as not being able to resize a node from the editor, and
+     * it was worse than that — the node was invisible once chosen.
+     */
     return {
-      center: { x: bounds.centerX, y: bounds.centerY },
-      halfW: bounds.width / 2,
-      halfH: bounds.height / 2,
-      angle: 0
+      center: { x: object.x ?? 0, y: object.y ?? 0 },
+      halfW: EMPTY_SELECTION_SIZE / 2,
+      halfH: EMPTY_SELECTION_SIZE / 2,
+      angle: Phaser.Math.DegToRad(object.angle ?? 0)
     };
   }
 
@@ -663,6 +680,9 @@ export class GameScene extends Phaser.Scene {
     const entry = this.primarySelection();
     const geometry = entry ? this.selectionGeometry(entry) : undefined;
     if (!entry || !geometry) return;
+    // A locked node cannot be dragged and could still be scaled and rotated by
+    // its handles, which is most of a lock not locking.
+    if (entry.node.locked) return;
 
     this.gesture = {
       entry,
