@@ -1296,6 +1296,8 @@ export class GameScene extends Phaser.Scene {
     object.on('drag', (_pointer: Phaser.Input.Pointer, dragX: number, dragY: number) => {
       if (component.axis !== 'y') object.x = dragX;
       if (component.axis !== 'x') object.y = dragY;
+      // A bat that is dragged has to take its collider with it.
+      this.followBody(entry.object);
     });
 
     object.on('dragend', () => {
@@ -1513,6 +1515,27 @@ export class GameScene extends Phaser.Scene {
     if (this.mode === 'play') this.fire({ on: 'resize' });
   };
 
+  /**
+   * A static body brought to where its object now is.
+   *
+   * Arcade physics reads a static body's position once, when it is created,
+   * and never again — moving the picture leaves the collider behind. For a
+   * brick-breaker paddle that is the whole game: the ball passes through the
+   * bat and bounces off a bat-shaped hole where it started.
+   *
+   * Dynamic bodies are the other way round, the body moving the object, so
+   * they are left alone.
+   */
+  private followBody(object: Phaser.GameObjects.GameObject): void {
+    // The kind of body, not the presence of the method: a dynamic body has it
+    // too, and calling it there resets the position physics just worked out —
+    // the ball simply stops dead.
+    const body = (object as { body?: Phaser.Physics.Arcade.StaticBody }).body;
+    if (body?.physicsType === Phaser.Physics.Arcade.STATIC_BODY) {
+      body.updateFromGameObject();
+    }
+  }
+
   private applyTransform(entry: LiveNode): void {
     const { object, transform } = entry;
     // Once a body is simulating, the physics engine owns the position. Writing
@@ -1572,6 +1595,7 @@ export class GameScene extends Phaser.Scene {
     );
     // Containers have no origin; everything else is centred by default.
     setters.setOrigin?.(transform.originX, transform.originY);
+    if (!simulating) this.followBody(object);
     void target;
   }
 
@@ -2031,6 +2055,28 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
+    /**
+     * A static body catches up with whatever moved its object.
+     *
+     * Arcade reads a static body's position when it is created and never
+     * again, and a script setting node.x reaches neither the layout nor the
+     * drag handler — so this is the one place that sees every way a thing can
+     * move. Only when they actually differ: a wall of bricks that never moves
+     * costs a comparison each.
+     */
+    for (const entry of Array.from(this.live.values())) {
+      const object = entry.object as Phaser.GameObjects.GameObject & {
+        x?: number;
+        y?: number;
+        body?: Phaser.Physics.Arcade.StaticBody;
+      };
+      const body = object.body;
+      if (body?.physicsType !== Phaser.Physics.Arcade.STATIC_BODY) continue;
+      if (body.center.x !== object.x || body.center.y !== object.y) {
+        body.updateFromGameObject();
+      }
+    }
+
     if (!this.scriptHandlers.size) return;
     for (const [owner, handlers] of Array.from(this.scriptHandlers.entries())) {
       this.callHandlers(owner, handlers.get('update'), delta / 1000, undefined);
