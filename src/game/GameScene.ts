@@ -523,21 +523,45 @@ export class GameScene extends Phaser.Scene {
     const object = entry.object as Phaser.GameObjects.GameObject & {
       x?: number;
       y?: number;
+      width?: number;
+      height?: number;
       displayWidth?: number;
       displayHeight?: number;
       angle?: number;
       getBounds?: () => Phaser.Geom.Rectangle;
+      getWorldTransformMatrix?: () => Phaser.GameObjects.Components.TransformMatrix;
     };
 
-    const width = object.displayWidth ?? 0;
-    const height = object.displayHeight ?? 0;
+    /**
+     * World space, not the object's own.
+     *
+     * A node inside a group has x and y local to that group, and the pointer
+     * never does — so the outline and handles were drawn near the top-left of
+     * the screen while the image sat in the middle, and dragging where the
+     * handles appeared to be did nothing at all. Reported as a node that could
+     * be selected and moved but not resized, which is exactly how it looks:
+     * moving comes from Phaser's own drag coordinates and was always right.
+     *
+     * For a node with no parent this is the same answer as before.
+     */
+    const world = object.getWorldTransformMatrix?.();
+    const center = world
+      ? { x: world.tx, y: world.ty }
+      : { x: object.x ?? 0, y: object.y ?? 0 };
+    const scaleX = world ? world.scaleX : 1;
+    const scaleY = world ? world.scaleY : 1;
+
+    // Its own measurement times the whole chain of scales above it, rather
+    // than displayWidth, which has only its own scale in it.
+    const width = world ? (object.width ?? 0) * scaleX : (object.displayWidth ?? 0);
+    const height = world ? (object.height ?? 0) * scaleY : (object.displayHeight ?? 0);
 
     if (width > 0 && height > 0) {
       return {
-        center: { x: object.x ?? 0, y: object.y ?? 0 },
+        center,
         halfW: width / 2,
         halfH: height / 2,
-        angle: Phaser.Math.DegToRad(object.angle ?? 0)
+        angle: world ? world.rotation : Phaser.Math.DegToRad(object.angle ?? 0)
       };
     }
 
@@ -562,10 +586,10 @@ export class GameScene extends Phaser.Scene {
      * it was worse than that — the node was invisible once chosen.
      */
     return {
-      center: { x: object.x ?? 0, y: object.y ?? 0 },
+      center,
       halfW: EMPTY_SELECTION_SIZE / 2,
       halfH: EMPTY_SELECTION_SIZE / 2,
-      angle: Phaser.Math.DegToRad(object.angle ?? 0)
+      angle: world ? world.rotation : Phaser.Math.DegToRad(object.angle ?? 0)
     };
   }
 
