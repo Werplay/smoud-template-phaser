@@ -38,6 +38,11 @@ const HANDLE_RADIUS = 7;
 const ROTATE_ARM_LENGTH = 28;
 /** The box drawn for a node that has no size — an empty group, so far. */
 const EMPTY_SELECTION_SIZE = 48;
+/**
+ * Where an overlay's depth starts, above anything a scene is likely to use and
+ * below the editor's own handles at 10,000.
+ */
+const OVERLAY_DEPTH = 9000;
 /** A node can be shrunk but not inverted or vanished by a corner drag. */
 const MIN_SCALE = 0.05;
 
@@ -356,7 +361,13 @@ export class GameScene extends Phaser.Scene {
    */
   private enableEditing(): void {
     for (const entry of Array.from(this.live.values())) {
-      if (entry.node.locked || entry.sceneId !== this.visibleScene) continue;
+      // An overlay is on every scene, so it is editable from every scene.
+      if (
+        entry.node.locked ||
+        (entry.sceneId !== this.visibleScene && !entry.node.overlay)
+      ) {
+        continue;
+      }
 
       const object = entry.object;
 
@@ -1541,10 +1552,19 @@ export class GameScene extends Phaser.Scene {
     applyScale?.call(object, placement.scaleX, placement.scaleY);
     setters.setAngle?.(transform.rotation);
     setters.setAlpha?.(transform.alpha);
-    setters.setDepth?.(transform.depth);
+    /**
+     * An overlay is above the scene it is over, whatever else is on it.
+     *
+     * Its own depth still orders overlays among themselves — two of them can
+     * be layered — it is only lifted clear of the scene's own range. Below the
+     * editor's handles, which have to stay on top of everything.
+     */
+    setters.setDepth?.(
+      entry.node.overlay ? OVERLAY_DEPTH + transform.depth : transform.depth
+    );
     setters.setVisible?.(
       transform.visible &&
-        entry.sceneId === this.visibleScene &&
+        (entry.node.overlay || entry.sceneId === this.visibleScene) &&
         !(this.mode === 'play' && this.prototypes.has(entry.node.id))
     );
     // Containers have no origin; everything else is centred by default.

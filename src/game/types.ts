@@ -202,6 +202,8 @@ export interface GameNode {
   behaviors: Behavior[];
   children: GameNode[];
   locked: boolean;
+  /** Shown in every scene, above them. A transition, or anything persistent. */
+  overlay: boolean;
   script: string;
 }
 
