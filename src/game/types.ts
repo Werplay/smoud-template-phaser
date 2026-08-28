@@ -183,7 +183,11 @@ export type GameAction =
       /** x1, y1, x2, y2 of a cubic bezier, used when easing is 'custom'. */
       curve?: [number, number, number, number];
       repeat: number;
+      /** Optional for the same reason as delay: older docs carry neither. */
+      repeatDelay?: number;
       yoyo: boolean;
+      /** Optional for the same reason as the two above. */
+      hold?: number;
     }
   | { do: 'setProperty'; target?: string; key: string; value: string | number | boolean }
   | { do: 'show'; target?: string }

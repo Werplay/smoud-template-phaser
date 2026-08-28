@@ -1791,13 +1791,15 @@ export class GameScene extends Phaser.Scene {
         throw new Error(`There is nothing to animate called "${String(nameOrId)}". ${this.nameList()}`);
       }
 
-      const { duration, delay, easing, curve, repeat, yoyo, ...destination } = to as {
+      const { duration, delay, easing, curve, repeat, repeatDelay, yoyo, hold, ...destination } = to as {
         duration?: number;
         delay?: number;
         easing?: Easing;
         curve?: [number, number, number, number];
         repeat?: number;
+        repeatDelay?: number;
         yoyo?: boolean;
+        hold?: number;
       };
 
       this.runTween(entry, {
@@ -1808,7 +1810,9 @@ export class GameScene extends Phaser.Scene {
         easing: easing ?? (curve ? 'custom' : 'quadOut'),
         curve,
         repeat: repeat ?? 0,
-        yoyo: yoyo ?? false
+        repeatDelay: repeatDelay ?? 0,
+        yoyo: yoyo ?? false,
+        hold: hold ?? 0
       } as Extract<GameAction, { do: 'tween' }>);
     };
 
@@ -2423,7 +2427,9 @@ export class GameScene extends Phaser.Scene {
           ? cubicBezier(...(action.curve ?? [0.25, 0.1, 0.25, 1]))
           : EASING[action.easing] || 'Quad.easeOut',
       repeat: action.repeat,
+      repeatDelay: action.repeatDelay ?? 0,
       yoyo: action.yoyo,
+      hold: action.hold ?? 0,
       onComplete: () => {
         if (action.repeat === -1 || action.yoyo) return;
         target.transform = destination;
