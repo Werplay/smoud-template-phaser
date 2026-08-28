@@ -213,6 +213,8 @@ export interface Behavior {
   conditions: Condition[];
   actions: GameAction[];
   parallel: boolean;
+  /** Optional: a doc saved before this existed has no flag and is active. */
+  enabled?: boolean;
 }
 
 export interface GameNode {

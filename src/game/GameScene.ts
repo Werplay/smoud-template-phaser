@@ -896,7 +896,7 @@ export class GameScene extends Phaser.Scene {
     // A tap behaviour is itself a declaration that the node is tappable. Without
     // this, authoring "on tap" on a node that has no tappable component produces
     // a behaviour that can never fire and says nothing about why.
-    if (!tappable && node.behaviors.some((behavior) => behavior.event.on === 'tap')) {
+    if (!tappable && this.activeBehaviors(node).some((behavior) => behavior.event.on === 'tap')) {
       this.makeTappable(node, object, 0, 0);
     }
 
@@ -1148,6 +1148,9 @@ export class GameScene extends Phaser.Scene {
           for (const component of node.components) {
             if (component.type === 'counter') note(component.key);
           }
+          // Disabled ones count here: a counter named only by a behaviour that
+          // is currently off should still exist, so turning it back on does not
+          // start from a counter that was never declared.
           for (const behavior of node.behaviors) {
             if (behavior.event.on === 'counterChange') note(behavior.event.key);
             for (const condition of behavior.conditions) {
@@ -1257,7 +1260,7 @@ export class GameScene extends Phaser.Scene {
       }
 
       // Leaving the world is only observable if Phaser is asked to watch for it.
-      if (node.behaviors.some((behavior) => behavior.event.on === 'leaveBounds')) {
+      if (this.activeBehaviors(node).some((behavior) => behavior.event.on === 'leaveBounds')) {
         body.onWorldBounds = true;
       }
     }
@@ -1335,6 +1338,18 @@ export class GameScene extends Phaser.Scene {
     if (component.lifetime > 0) {
       this.timers.push(this.time.delayedCall(component.lifetime * 1000, retire));
     }
+  }
+
+  /**
+   * The behaviours that are allowed to fire.
+   *
+   * Every place that reads behaviours goes through this, rather than each
+   * testing the flag: a disabled behaviour that still wired a collider or
+   * still made its node tappable would keep half-working, which is worse
+   * than not turning off at all.
+   */
+  private activeBehaviors(node: GameNode): Behavior[] {
+    return node.behaviors.filter((behavior) => behavior.enabled !== false);
   }
 
   /** A deep copy with fresh ids, so clones never collide with their prototype. */
@@ -1472,7 +1487,7 @@ export class GameScene extends Phaser.Scene {
    * naming a tag nothing carries yet still has to be live when something does.
    */
   private wireCollisionsFor(entry: LiveNode): void {
-    for (const behavior of entry.node.behaviors) {
+    for (const behavior of this.activeBehaviors(entry.node)) {
       const event = behavior.event;
       if (event.on !== 'collide' && event.on !== 'overlap') continue;
 
@@ -1702,7 +1717,7 @@ export class GameScene extends Phaser.Scene {
 
     for (const entry of Array.from(this.live.values())) {
       if (entry.sceneId !== sceneId) continue;
-      for (const behavior of entry.node.behaviors) {
+      for (const behavior of this.activeBehaviors(entry.node)) {
         if (!this.eventMatches(behavior.event, event)) continue;
         if (!behavior.conditions.every((condition) => this.conditionHolds(condition))) continue;
         this.runActions(behavior, entry);
@@ -1723,7 +1738,7 @@ export class GameScene extends Phaser.Scene {
     for (const entry of Array.from(this.live.values())) {
       if (nodeId && entry.node.id !== nodeId) continue;
 
-      for (const behavior of entry.node.behaviors) {
+      for (const behavior of this.activeBehaviors(entry.node)) {
         if (!this.eventMatches(behavior.event, event)) continue;
         if (!behavior.conditions.every((condition) => this.conditionHolds(condition))) continue;
         this.runActions(behavior, entry, subjectId);
