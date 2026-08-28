@@ -177,6 +177,8 @@ export type GameAction =
       target?: string;
       to: Partial<Transform>;
       duration: number;
+      /** Optional: a doc saved before delay existed does not carry one. */
+      delay?: number;
       easing: Easing;
       /** x1, y1, x2, y2 of a cubic bezier, used when easing is 'custom'. */
       curve?: [number, number, number, number];

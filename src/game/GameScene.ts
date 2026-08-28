@@ -1791,8 +1791,9 @@ export class GameScene extends Phaser.Scene {
         throw new Error(`There is nothing to animate called "${String(nameOrId)}". ${this.nameList()}`);
       }
 
-      const { duration, easing, curve, repeat, yoyo, ...destination } = to as {
+      const { duration, delay, easing, curve, repeat, yoyo, ...destination } = to as {
         duration?: number;
+        delay?: number;
         easing?: Easing;
         curve?: [number, number, number, number];
         repeat?: number;
@@ -1803,6 +1804,7 @@ export class GameScene extends Phaser.Scene {
         do: 'tween',
         to: destination as Partial<Transform>,
         duration: duration ?? 300,
+        delay: delay ?? 0,
         easing: easing ?? (curve ? 'custom' : 'quadOut'),
         curve,
         repeat: repeat ?? 0,
@@ -2414,6 +2416,7 @@ export class GameScene extends Phaser.Scene {
       angle: destination.rotation,
       alpha: destination.alpha,
       duration: action.duration,
+      delay: action.delay ?? 0,
       // A drawn curve goes in as a function; a named one as Phaser's own name.
       ease:
         action.easing === 'custom'
