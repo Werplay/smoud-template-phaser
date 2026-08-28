@@ -188,6 +188,8 @@ export type GameAction =
       yoyo: boolean;
       /** Optional for the same reason as the two above. */
       hold?: number;
+      /** The rest of the behaviour waits for this tween to land. */
+      chain?: boolean;
     }
   | { do: 'setProperty'; target?: string; key: string; value: string | number | boolean }
   | { do: 'show'; target?: string }

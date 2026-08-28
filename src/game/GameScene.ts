@@ -2282,25 +2282,41 @@ export class GameScene extends Phaser.Scene {
   /**
    * Sequential by default: each action starts after the ones before it, and a
    * `wait` pushes everything after it out. Parallel behaviours start together.
+   *
+   * Starting after is not the same as waiting for: an action that takes time
+   * still returns at once, so two tweens in a row run together unless one is
+   * marked to chain. A chained tween suspends the walk and resumes it from
+   * the tween's own completion rather than from a duration added up here,
+   * which is what keeps yoyo, hold and repeats out of the arithmetic.
    */
   private runActions(behavior: Behavior, entry: LiveNode, subjectId?: string): void {
-    let delay = 0;
+    const chains = (action: GameAction): boolean =>
+      !behavior.parallel && action.do === 'tween' && action.chain === true && action.repeat !== -1;
 
-    for (const action of behavior.actions) {
-      if (action.do === 'wait') {
-        if (!behavior.parallel) delay += action.seconds * 1000;
-        continue;
-      }
+    const walk = (from: number, delay: number): void => {
+      for (let index = from; index < behavior.actions.length; index += 1) {
+        const action = behavior.actions[index];
 
-      if (delay <= 0) {
-        this.runAction(action, entry, subjectId);
-      } else {
-        this.time.delayedCall(delay, () => this.runAction(action, entry, subjectId));
+        if (action.do === 'wait') {
+          if (!behavior.parallel) delay += action.seconds * 1000;
+          continue;
+        }
+
+        const rest = chains(action) ? () => walk(index + 1, 0) : undefined;
+        const run = () => this.runAction(action, entry, subjectId, rest);
+
+        if (delay <= 0) run();
+        else this.time.delayedCall(delay, run);
+
+        // The rest of the walk now belongs to that tween's completion.
+        if (rest) return;
       }
-    }
+    };
+
+    walk(0, 0);
   }
 
-  private runAction(action: GameAction, source: LiveNode, subjectId?: string): void {
+  private runAction(action: GameAction, source: LiveNode, subjectId?: string, then?: () => void): void {
     switch (action.do) {
       case 'openCta':
         sdk.install();
@@ -2402,8 +2418,10 @@ export class GameScene extends Phaser.Scene {
 
       case 'tween': {
         const target = this.resolve(action.target, source, subjectId);
-        if (!target) return;
-        this.runTween(target, action);
+        // Still releases what follows: a tween aimed at something that is gone
+        // should not take the rest of the behaviour down with it.
+        if (!target) return then?.();
+        this.runTween(target, action, then);
         return;
       }
 
@@ -2419,7 +2437,7 @@ export class GameScene extends Phaser.Scene {
    * written back to the node's transform on completion so a later resize keeps
    * the new position instead of snapping back to the authored one.
    */
-  private runTween(target: LiveNode, action: Extract<GameAction, { do: 'tween' }>): void {
+  private runTween(target: LiveNode, action: Extract<GameAction, { do: 'tween' }>, then?: () => void): void {
     const design = { width: this.doc.settings.designWidth, height: this.doc.settings.designHeight };
     const destination = { ...target.transform, ...action.to };
     const placement = target.isRoot
@@ -2446,8 +2464,10 @@ export class GameScene extends Phaser.Scene {
       yoyo: action.yoyo,
       hold: action.hold ?? 0,
       onComplete: () => {
-        if (action.repeat === -1 || action.yoyo) return;
-        target.transform = destination;
+        // A yoyo ends where it began, and one that repeats forever never gets
+        // here at all — but a chained action still needs releasing.
+        if (action.repeat !== -1 && !action.yoyo) target.transform = destination;
+        then?.();
       }
     });
   }
