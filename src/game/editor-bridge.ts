@@ -9,7 +9,7 @@ import type { GameDoc } from './types';
  * bundle is behind — a mismatch used to show up as features silently not
  * working, which is a bad way to learn your browser kept an old copy.
  */
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 
 export const EDITOR_MESSAGE = {
   doc: 'game-editor:doc',

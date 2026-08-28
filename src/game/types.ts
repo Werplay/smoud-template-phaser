@@ -217,6 +217,8 @@ export interface Behavior {
   parallel: boolean;
   /** Optional: a doc saved before this existed has no flag and is active. */
   enabled?: boolean;
+  /** -1 forever, 0 once, n for n more passes. */
+  loop?: number;
 }
 
 export interface GameNode {

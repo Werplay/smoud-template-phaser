@@ -2289,20 +2289,41 @@ export class GameScene extends Phaser.Scene {
    * the tween's own completion rather than from a duration added up here,
    * which is what keeps yoyo, hold and repeats out of the arithmetic.
    */
-  private runActions(behavior: Behavior, entry: LiveNode, subjectId?: string): void {
+  private runActions(behavior: Behavior, entry: LiveNode, subjectId?: string, pass = 0): void {
+    const loop = behavior.loop ?? 0;
     const chains = (action: GameAction): boolean =>
       !behavior.parallel && action.do === 'tween' && action.chain === true && action.repeat !== -1;
 
-    const walk = (from: number, delay: number): void => {
+    /**
+     * Round again, once the pass has actually finished — which is later than
+     * the walk returning whenever a tween or a wait is in the list.
+     *
+     * A pass that took no time is refused rather than looped: it would start
+     * again in the frame it ended and never yield. The panel says as much
+     * next to the control, so this is a backstop and not the explanation.
+     */
+    const again = (delay: number, timed: boolean): void => {
+      if (loop === 0 || (loop > 0 && pass >= loop)) return;
+      if (!timed && delay <= 0) return;
+
+      const next = () => this.runActions(behavior, entry, subjectId, pass + 1);
+      if (delay > 0) this.time.delayedCall(delay, next);
+      else next();
+    };
+
+    const walk = (from: number, delay: number, timed: boolean): void => {
       for (let index = from; index < behavior.actions.length; index += 1) {
         const action = behavior.actions[index];
 
         if (action.do === 'wait') {
-          if (!behavior.parallel) delay += action.seconds * 1000;
+          if (!behavior.parallel) {
+            delay += action.seconds * 1000;
+            timed = true;
+          }
           continue;
         }
 
-        const rest = chains(action) ? () => walk(index + 1, 0) : undefined;
+        const rest = chains(action) ? () => walk(index + 1, 0, true) : undefined;
         const run = () => this.runAction(action, entry, subjectId, rest);
 
         if (delay <= 0) run();
@@ -2311,9 +2332,11 @@ export class GameScene extends Phaser.Scene {
         // The rest of the walk now belongs to that tween's completion.
         if (rest) return;
       }
+
+      again(delay, timed);
     };
 
-    walk(0, 0);
+    walk(0, 0, false);
   }
 
   private runAction(action: GameAction, source: LiveNode, subjectId?: string, then?: () => void): void {
