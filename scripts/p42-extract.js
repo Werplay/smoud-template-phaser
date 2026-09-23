@@ -10,20 +10,23 @@ const path = require('path');
 
 const ROOT = process.cwd();
 const SRC_DIR = path.join(ROOT, 'src');
+const ASSETS_DIR = path.join(ROOT, 'assets');
 
 // Fixed SDK bootstrap — same across every template, not "game content".
 const BOOTSTRAP_FILES = new Set(['index.ts', 'index.html', 'index.css']);
 const CONFIG_FILES = ['build.json'];
+// Matches the per-asset embed cap build-playable.ts already uses for real exports.
+const MAX_ASSET_BYTES = 60 * 1024 * 1024;
 const P42_VERSION = 1;
 
-function listSceneFiles(dir, base = '') {
+function walkFiles(dir, base, exclude = new Set()) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   let files = [];
   for (const entry of entries) {
     const relPath = path.join(base, entry.name);
     if (entry.isDirectory()) {
-      files = files.concat(listSceneFiles(path.join(dir, entry.name), relPath));
-    } else if (!BOOTSTRAP_FILES.has(relPath)) {
+      files = files.concat(walkFiles(path.join(dir, entry.name), relPath, exclude));
+    } else if (!exclude.has(relPath)) {
       files.push(relPath);
     }
   }
@@ -38,10 +41,27 @@ function readAll(dir, relPaths) {
   return out;
 }
 
+function readAllBinary(dir, relPaths) {
+  const out = {};
+  for (const relPath of relPaths) {
+    const key = relPath.split(path.sep).join('/');
+    const full = path.join(dir, relPath);
+    const size = fs.statSync(full).size;
+    if (size > MAX_ASSET_BYTES) {
+      throw new Error(
+        `p42: asset "${key}" is ${(size / 1024 / 1024).toFixed(1)}MB, over the ${MAX_ASSET_BYTES / 1024 / 1024}MB per-asset cap`
+      );
+    }
+    out[key] = fs.readFileSync(full).toString('base64');
+  }
+  return out;
+}
+
 function extract() {
-  const scenePaths = listSceneFiles(SRC_DIR);
+  const scenePaths = walkFiles(SRC_DIR, '', BOOTSTRAP_FILES);
   const scenes = readAll(SRC_DIR, scenePaths);
   const config = readAll(ROOT, CONFIG_FILES.filter((f) => fs.existsSync(path.join(ROOT, f))));
+  const assets = fs.existsSync(ASSETS_DIR) ? readAllBinary(ASSETS_DIR, walkFiles(ASSETS_DIR, '')) : {};
 
   const manifest = {
     p42Version: P42_VERSION,
@@ -50,8 +70,12 @@ function extract() {
     // ponytail: editable fields aren't auto-derived yet, ships empty.
     // Add static-analysis extraction here once the exporter needs per-field editing.
     editable: [],
+    values: {},
     scenes,
-    config
+    config,
+    // Binary files imported by scenes (assets/*), base64-encoded so the .p42
+    // stays a self-contained, buildable checkout.
+    assets
   };
 
   return manifest;
@@ -93,7 +117,8 @@ function main() {
 
   const sceneCount = Object.keys(manifest.scenes).length;
   const configCount = Object.keys(manifest.config).length;
-  console.log(`Wrote ${outPath} (${sceneCount} scene file(s), ${configCount} config file(s)) — round-trip OK`);
+  const assetCount = Object.keys(manifest.assets).length;
+  console.log(`Wrote ${outPath} (${sceneCount} scene file(s), ${configCount} config file(s), ${assetCount} asset(s)) — round-trip OK`);
 }
 
 if (require.main === module) {
