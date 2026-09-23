@@ -12,17 +12,32 @@ const ROOT = process.cwd();
 const SRC_DIR = path.join(ROOT, 'src');
 const ASSETS_DIR = path.join(ROOT, 'assets');
 
-// Fixed SDK bootstrap — same across every template, not "game content".
-const BOOTSTRAP_FILES = new Set(['index.ts', 'index.html', 'index.css']);
-const CONFIG_FILES = ['build.json'];
+// All of src/ is captured, bootstrap (index.ts/html/css) included — templates
+// customize it (font loading, startup order, canvas CSS), so there is no
+// shared bootstrap to substitute at build time. Config files are the ones
+// that shape the build itself; any that exist are captured.
+const CONFIG_FILES = [
+  'build.json',
+  'tsconfig.json',
+  'globals.d.ts',
+  'babel.config.json',
+  'webpack.overrides.json'
+];
+// Optional, template-authored: which exported values are safe to edit from the
+// prefab UI, and where they live. See p42.editable.json for the shape.
+const EDITABLE_FILE = 'p42.editable.json';
 // Matches the per-asset embed cap build-playable.ts already uses for real exports.
 const MAX_ASSET_BYTES = 60 * 1024 * 1024;
 const P42_VERSION = 1;
+
+// OS clutter that must never ship inside a .p42.
+const IGNORED_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
 
 function walkFiles(dir, base, exclude = new Set()) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   let files = [];
   for (const entry of entries) {
+    if (IGNORED_FILES.has(entry.name)) continue;
     const relPath = path.join(base, entry.name);
     if (entry.isDirectory()) {
       files = files.concat(walkFiles(path.join(dir, entry.name), relPath, exclude));
@@ -57,20 +72,122 @@ function readAllBinary(dir, relPaths) {
   return out;
 }
 
+function readEditable() {
+  const p = path.join(ROOT, EDITABLE_FILE);
+  if (!fs.existsSync(p)) return [];
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
+// Finds the '}' matching the '{' at openIndex.
+function findBalanced(source, openIndex) {
+  let depth = 0;
+  for (let i = openIndex; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function narrowToSegment(source, segment, isFirst) {
+  const declPattern = isFirst
+    ? new RegExp(`export\\s+const\\s+${segment}\\b[^=]*=\\s*\\{`)
+    : new RegExp(`\\b${segment}\\s*:\\s*\\{`);
+  const m = declPattern.exec(source);
+  if (!m) return null;
+  const openIdx = m.index + m[0].length - 1;
+  const closeIdx = findBalanced(source, openIdx);
+  return closeIdx === -1 ? null : source.slice(openIdx + 1, closeIdx);
+}
+
+// Resolves a dotted `symbol` path (e.g. "BEATS.win.badge") to its string-literal
+// value inside `source`. Only handles literal string leaves reached through plain
+// object nesting — good enough to verify the text fields authors hand-copy into
+// p42.editable.json's `default`. Returns undefined if the shape isn't recognized;
+// callers should warn rather than fail in that case, since this is a regex
+// narrower, not a real parser.
+function extractLiteral(source, symbol) {
+  const segments = symbol.split('.');
+  let scope = source;
+  for (let i = 0; i < segments.length - 1; i++) {
+    scope = narrowToSegment(scope, segments[i], i === 0);
+    if (scope === null) return undefined;
+  }
+  const leaf = segments[segments.length - 1];
+  const leafPattern = new RegExp(
+    `\\b${leaf}\\s*:\\s*(?:(['"\`])((?:\\\\.|(?!\\1).)*)\\1|(-?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?))`
+  );
+  const match = leafPattern.exec(scope);
+  if (!match) return undefined;
+  // Number literals (text style sizes etc.) come back normalized, as strings.
+  return match[2] !== undefined ? match[2] : String(Number(match[3]));
+}
+
+// Every literal p42.editable.json points at: each field's value plus each of
+// a text field's style bindings. Keys match what the editor stores in `values`.
+function editableUnits(editable) {
+  const units = [];
+  for (const field of editable) {
+    units.push({ key: field.key, field, symbol: field.symbol, default: field.default, verify: field.type === 'text' });
+    for (const [prop, binding] of Object.entries(field.style || {})) {
+      const numeric = typeof binding.default === 'number';
+      units.push({
+        key: `${field.key}.${prop}`,
+        field,
+        symbol: binding.symbol,
+        default: numeric ? String(Number(binding.default)) : String(binding.default),
+        verify: true
+      });
+    }
+  }
+  return units;
+}
+
+// ponytail: only verifies simple string-literal fields (type: 'text'). Asset
+// fields (e.g. IMAGES.endcard, a shorthand property resolving through an
+// `import ... from '...'` line) need real import resolution to verify, not
+// regex — those go unverified until this grows a real TS parser.
+function verifyEditableDefaults(editable, scenes) {
+  for (const unit of editableUnits(editable)) {
+    if (!unit.verify) continue;
+    const { field } = unit;
+    const source = scenes[field.file];
+    if (source === undefined) {
+      console.warn(`p42: editable field "${unit.key}" references unknown file "${field.file}"`);
+      continue;
+    }
+    const actual = extractLiteral(source, unit.symbol);
+    if (actual === undefined) {
+      console.warn(`p42: could not verify editable field "${unit.key}" (${field.file}:${unit.symbol}) — source shape not recognized`);
+      continue;
+    }
+    if (actual !== unit.default) {
+      throw new Error(
+        `p42.editable.json is stale: "${unit.key}" (${field.file}:${unit.symbol}) is ${JSON.stringify(actual)} in source but ${JSON.stringify(unit.default)} in p42.editable.json`
+      );
+    }
+  }
+}
+
 function extract() {
-  const scenePaths = walkFiles(SRC_DIR, '', BOOTSTRAP_FILES);
+  const scenePaths = walkFiles(SRC_DIR, '');
   const scenes = readAll(SRC_DIR, scenePaths);
   const config = readAll(ROOT, CONFIG_FILES.filter((f) => fs.existsSync(path.join(ROOT, f))));
   const assets = fs.existsSync(ASSETS_DIR) ? readAllBinary(ASSETS_DIR, walkFiles(ASSETS_DIR, '')) : {};
+  const editable = readEditable();
+
+  verifyEditableDefaults(editable, scenes);
 
   const manifest = {
     p42Version: P42_VERSION,
     engine: 'phaser',
     generatedAt: new Date().toISOString(),
-    // ponytail: editable fields aren't auto-derived yet, ships empty.
-    // Add static-analysis extraction here once the exporter needs per-field editing.
-    editable: [],
-    values: {},
+    editable,
+    // Current field values, shown by the prefab UI and updated on edit. Seeded
+    // from each field's source default on a fresh extraction.
+    values: Object.fromEntries(editableUnits(editable).map((u) => [u.key, u.default])),
     scenes,
     config,
     // Binary files imported by scenes (assets/*), base64-encoded so the .p42
@@ -118,7 +235,10 @@ function main() {
   const sceneCount = Object.keys(manifest.scenes).length;
   const configCount = Object.keys(manifest.config).length;
   const assetCount = Object.keys(manifest.assets).length;
-  console.log(`Wrote ${outPath} (${sceneCount} scene file(s), ${configCount} config file(s), ${assetCount} asset(s)) — round-trip OK`);
+  const sizeKb = (fs.statSync(outPath).size / 1024).toFixed(0);
+  console.log(
+    `Wrote ${outPath} (${sceneCount} scene file(s), ${configCount} config file(s), ${assetCount} asset(s), ${manifest.editable.length} editable field(s), ${sizeKb}KB) — round-trip OK`
+  );
 }
 
 if (require.main === module) {
