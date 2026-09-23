@@ -130,6 +130,21 @@ function extractLiteral(source, symbol) {
 function editableUnits(editable) {
   const units = [];
   for (const field of editable) {
+    if (field.type === 'spine') {
+      // Its files are swapped like images (checked for existence, not value);
+      // skin and scale are literals, verified like any other.
+      const s = field.spine || {};
+      for (const sub of ['json', 'atlas', 'texture']) {
+        if (s[sub]) units.push({ key: `${field.key}.${sub}`, field, symbol: s[sub].symbol, default: String(s[sub].default), verify: false, asset: true });
+      }
+      for (const sub of ['skin', 'scale']) {
+        const b = s[sub];
+        if (!b) continue;
+        const def = typeof b.default === 'number' ? String(Number(b.default)) : String(b.default);
+        units.push({ key: `${field.key}.${sub}`, field, symbol: b.symbol, default: def, verify: true });
+      }
+      continue;
+    }
     units.push({ key: field.key, field, symbol: field.symbol, default: field.default, verify: field.type === 'text' });
     for (const [prop, binding] of Object.entries(field.style || {})) {
       const numeric = typeof binding.default === 'number';
@@ -149,8 +164,11 @@ function editableUnits(editable) {
 // fields (e.g. IMAGES.endcard, a shorthand property resolving through an
 // `import ... from '...'` line) need real import resolution to verify, not
 // regex — those go unverified until this grows a real TS parser.
-function verifyEditableDefaults(editable, scenes) {
+function verifyEditableDefaults(editable, scenes, assets) {
   for (const unit of editableUnits(editable)) {
+    if (unit.asset && !(unit.default.replace(/^assets\//, '') in assets)) {
+      throw new Error(`p42.editable.json: "${unit.key}" points at ${unit.default}, which isn't in assets/`);
+    }
     if (!unit.verify) continue;
     const { field } = unit;
     const source = scenes[field.file];
@@ -178,7 +196,7 @@ function extract() {
   const assets = fs.existsSync(ASSETS_DIR) ? readAllBinary(ASSETS_DIR, walkFiles(ASSETS_DIR, '')) : {};
   const editable = readEditable();
 
-  verifyEditableDefaults(editable, scenes);
+  verifyEditableDefaults(editable, scenes, assets);
 
   const manifest = {
     p42Version: P42_VERSION,
