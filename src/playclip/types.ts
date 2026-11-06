@@ -5,6 +5,8 @@
 
 import type { GlowStyle, GradientStyle, ShadowStyle, StrokeStyle } from './animation/styles';
 
+import type { OrientationFrames } from './animation/frame';
+
 export type Orientation = 'portrait' | 'landscape';
 
 export interface Vec2 {
@@ -118,6 +120,8 @@ export interface AssetEntry {
 }
 
 export interface PlayclipData {
+  /** Orientation frames (see animation/frame.ts); absent = the video is the frame. */
+  layout?: { frames?: OrientationFrames };
   version?: number;
   templateId?: string | null;
   name?: string | null;

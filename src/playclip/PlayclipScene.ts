@@ -6,6 +6,12 @@ import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
 import { layerOf } from './animation/layers';
 import {
+  DESIGN_SCREEN,
+  stageLayout,
+  type OrientationFrames,
+  type ResolvedFrame,
+} from './animation/frame';
+import {
   colorInt,
   DROP_SHADOW_BLUR_SCALE,
   glowOf,
@@ -263,7 +269,14 @@ export class PlayclipScene extends Phaser.Scene {
   private postRollClockStart = 0;
 
   private video?: Phaser.GameObjects.Video;
+  // The frame overlays are laid out in: the video itself, or for an adapted
+  // orientation the design screen shape (see animation/frame.ts).
   private videoRect: Rect = { left: 0, top: 0, width: 0, height: 0 };
+  private adapted: ResolvedFrame | null = null;
+  // What fills an adapted frame's bars: a blurred copy of the video (sharing
+  // its texture, so nothing is decoded twice) or a colour.
+  private frameBlur?: Phaser.GameObjects.Image;
+  private frameColor?: Phaser.GameObjects.Rectangle;
   private videoReady = false;
   // Geometry mask clipping every overlay to the video rect, so an asset placed
   // partly outside the video view is cropped at the edge rather than spilling
@@ -404,8 +417,11 @@ export class PlayclipScene extends Phaser.Scene {
 
   private computeOrientation(): Orientation {
     const video = this.playclipData.video || ({} as PlayclipData['video']);
-    if (video.portraitSrc && !video.landscapeSrc) return 'portrait';
-    if (video.landscapeSrc && !video.portraitSrc) return 'landscape';
+    const frames = this.playclipData.layout?.frames || {};
+    // A single-orientation video stays in that orientation, unless a frame is
+    // set up for the other one.
+    if (video.portraitSrc && !video.landscapeSrc && !frames.landscape) return 'portrait';
+    if (video.landscapeSrc && !video.portraitSrc && !frames.portrait) return 'landscape';
     const { width, height } = this.scale.gameSize;
     return height >= width ? 'portrait' : 'landscape';
   }
@@ -443,6 +459,9 @@ export class PlayclipScene extends Phaser.Scene {
       el.addEventListener('loadedmetadata', () => this.relayout(), { once: true });
     }
     video.once(Phaser.GameObjects.Events.VIDEO_CREATED, () => this.relayout());
+    // The blurred frame background shares the video's texture, which exists
+    // once the first frame is decoded.
+    video.once(Phaser.GameObjects.Events.VIDEO_TEXTURE, () => this.relayout());
 
     // When the clip plays through to its end, the playable is complete — tell the
     // network SDK so it fires its end hook (Mintegral's window.gameEnd(), etc.).
@@ -495,14 +514,55 @@ export class PlayclipScene extends Phaser.Scene {
     const natW = element?.videoWidth || this.video.width || 0;
     const natH = element?.videoHeight || this.video.height || 0;
 
-    this.videoRect = containRect(natW, natH, W, H);
-    this.video.setPosition(
-      this.videoRect.left + this.videoRect.width / 2,
-      this.videoRect.top + this.videoRect.height / 2,
-    );
-    if (this.videoRect.width && this.videoRect.height) {
-      this.video.setDisplaySize(this.videoRect.width, this.videoRect.height);
+    const layout =
+      natW && natH
+        ? stageLayout(this.orientation, W, H, natW / natH, this.frames())
+        : null;
+    this.adapted = layout?.adapted ?? null;
+    // Unadapted: exactly as before (the video, contained, is the frame).
+    this.videoRect = layout?.adapted ? layout.frame : containRect(natW, natH, W, H);
+    const v = layout?.adapted ? layout.video : this.videoRect;
+    this.video.setPosition(v.left + v.width / 2, v.top + v.height / 2);
+    if (v.width && v.height) {
+      this.video.setDisplaySize(v.width, v.height);
     }
+    this.layoutFrameBackground(W, H);
+  }
+
+  /** Frames apply to single-video playclips only. */
+  private frames(): OrientationFrames | null {
+    const v = this.playclipData.video || ({} as PlayclipData['video']);
+    if (v.portraitSrc && v.landscapeSrc && v.portraitSrc !== v.landscapeSrc) return null;
+    return this.playclipData.layout?.frames || null;
+  }
+
+  // Fill the screen behind an adapted frame: a blurred, dimmed copy of the
+  // video covering it, or a flat colour.
+  private layoutFrameBackground(W: number, H: number): void {
+    const a = this.adapted;
+    const blur = a?.background === 'blur';
+    if (a && !blur) {
+      if (!this.frameColor) {
+        this.frameColor = this.add.rectangle(0, 0, 1, 1, 0).setOrigin(0).setDepth(DEPTH_VIDEO - 1);
+      }
+      this.frameColor.setPosition(0, 0).setSize(W, H).setFillStyle(colorInt(a.backgroundColor)).setVisible(true);
+    } else {
+      this.frameColor?.setVisible(false);
+    }
+    const texture = this.video?.videoTexture;
+    if (!blur || !texture) {
+      this.frameBlur?.setVisible(false);
+      return;
+    }
+    if (!this.frameBlur) {
+      this.frameBlur = this.add.image(0, 0, texture).setDepth(DEPTH_VIDEO - 1).setTint(0xbfbfbf);
+      // WebGL only; the Canvas renderer shows the dimmed copy unblurred.
+      this.frameBlur.preFX?.addBlur(1, 2, 2, 1.5, 0xffffff, 8);
+    }
+    const tw = this.frameBlur.frame.realWidth || 1;
+    const th = this.frameBlur.frame.realHeight || 1;
+    const k = Math.max(W / tw, H / th) * 1.1;
+    this.frameBlur.setPosition(W / 2, H / 2).setScale(k).setVisible(true);
   }
 
   // --- Overlays -----------------------------------------------------------
@@ -563,6 +623,12 @@ export class PlayclipScene extends Phaser.Scene {
     const natH = element?.videoHeight || this.video?.height || 0;
     const refGameW = orientation === 'portrait' ? 360 : 640;
     const refGameH = orientation === 'portrait' ? 640 : 360;
+    if (this.adapted) {
+      // An adapted frame has the design screen's shape in the editor too.
+      const d = DESIGN_SCREEN[orientation];
+      const ref = containRect(d.width, d.height, refGameW, refGameH);
+      return { width: ref.width, height: ref.height };
+    }
     if (natW && natH) {
       const ref = containRect(natW, natH, refGameW, refGameH);
       return { width: ref.width, height: ref.height };
@@ -1555,6 +1621,11 @@ export class PlayclipScene extends Phaser.Scene {
       };
       if (typeof root.setMask === 'function') root.setMask(mask);
     });
+    // A filled (cropped) video stays inside its frame, as in the editor.
+    if (this.video) {
+      if (this.adapted) this.video.setMask(mask);
+      else this.video.clearMask();
+    }
   }
 
   // --- Public controls (driven by Game / SDK events) ----------------------
