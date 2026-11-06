@@ -75,3 +75,38 @@ export function cssEasing(
 ): EaseFn {
   return CSS_EASINGS[(name as CssEasing) ?? fallback] ?? CSS_EASINGS[fallback];
 }
+
+/**
+ * After Effects temporal ease (speed in value units/s, influence 0..1) to a
+ * cubic-bézier, as EffectCraft's Lottie exporter maps it
+ * (crates/lottie/src/anim.rs): for a segment of `duration` seconds changing
+ * the value by `delta`,
+ *   x1 = influenceOut,      y1 = speedOut · influenceOut · duration / delta
+ *   x2 = 1 − influenceIn,   y2 = 1 − speedIn · influenceIn · duration / delta
+ * Speed 0 with influence 1/3 is "Easy Ease".
+ */
+export interface AeEase {
+  speedOut?: number;
+  influenceOut?: number;
+  speedIn?: number;
+  influenceIn?: number;
+}
+
+export function aeEaseToBezier(
+  ease: AeEase,
+  duration: number,
+  delta: number,
+): [number, number, number, number] {
+  const io = clampInfluence(ease.influenceOut ?? 1 / 3);
+  const ii = clampInfluence(ease.influenceIn ?? 1 / 3);
+  // A flat segment has no slope to express; keep its shape linear in y.
+  const k = delta === 0 ? 0 : duration / delta;
+  return [
+    io,
+    (ease.speedOut ?? 0) * io * k,
+    1 - ii,
+    1 - (ease.speedIn ?? 0) * ii * k,
+  ];
+}
+
+const clampInfluence = (v: number) => Math.min(1, Math.max(0.01, v));

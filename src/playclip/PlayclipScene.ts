@@ -4,6 +4,7 @@ import { PLAYCLIP_DATA } from '../playclip-data';
 import { isEndcardVisible } from './endcard-visibility';
 import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
+import { layerOf } from './animation/layers';
 import {
   computePlaybackTime,
   getPostRollConfig,
@@ -88,6 +89,11 @@ function pickOriented<T>(
   return value as T | undefined;
 }
 
+// Anchor (rotation/scale pivot) as fractions of the box; 0.5/0.5 = centre.
+function anchorOf(style: AssetStyle): { ax: number; ay: number } {
+  return { ax: (style.anchorX ?? 50) / 100, ay: (style.anchorY ?? 50) / 100 };
+}
+
 function cssColorToInt(color: string | undefined): number | undefined {
   if (!color) return undefined;
   try {
@@ -138,6 +144,9 @@ interface Overlay {
   base?: { x: number; y: number; scaleX: number; scaleY: number; angle: number };
   // Editor px → screen px, so animation distances keep their designed size.
   designScale: number;
+  // root position minus the box centre: the anchor (pivot) offset, so taps
+  // still hit-test against the drawn box.
+  anchorOffset?: Vec2;
   // Glow FX, created on first use; null when the renderer can't do FX.
   glow?: Phaser.FX.Glow | null;
 }
@@ -162,14 +171,10 @@ const SUPPORTED_TYPES: PlayclipAsset['type'][] = [
   'transparent-button',
 ];
 
-// Draw order mirrors the editor: end card is the full-screen background; every
-// timeline overlay (text, image, buttons) renders above it.
+// Draw order mirrors the editor: the video at the bottom, then every overlay at
+// its layer (animation/layers.ts — per-type defaults, or the asset's zIndex),
+// with the end card behind them.
 const DEPTH_VIDEO = 0;
-const DEPTH_ENDCARD = 10;
-const DEPTH_TEXT = 20;
-const DEPTH_IMAGE = 25;
-const DEPTH_BUTTON = 30;
-const DEPTH_TRANSPARENT_BUTTON = 35;
 
 // ---------------------------------------------------------------------------
 // Scene
@@ -541,11 +546,19 @@ export class PlayclipScene extends Phaser.Scene {
     text.setWordWrapWidth(Math.max(1, box.width - scaledPadX * 2), true);
     text.setFixedSize(box.width, box.height);
 
+    // Pivot on the anchor: move the origin there and shift the position so
+    // the box stays where it was. Flip mirrors the texture in place.
     const c = this.centerOf(asset, rect, orientation);
-    text.setPosition(c.x, c.y);
+    const { ax, ay } = anchorOf(st);
+    const ox = (ax - 0.5) * text.displayWidth;
+    const oy = (ay - 0.5) * text.displayHeight;
+    text.setOrigin(ax, ay);
+    text.setPosition(c.x + ox, c.y + oy);
     text.setAngle(st.rotation || 0);
     text.setFlipX(!!st.flipX);
     text.setFlipY(!!st.flipY);
+    const overlay = this.overlays.find((o) => o.root === text);
+    if (overlay) overlay.anchorOffset = { x: ox, y: oy };
   }
 
   private buildText(asset: PlayclipAsset): Overlay {
@@ -560,7 +573,7 @@ export class PlayclipScene extends Phaser.Scene {
         backgroundColor: textBackgroundColor(style.backgroundColor),
       })
       .setOrigin(0.5)
-      .setDepth(DEPTH_TEXT);
+      .setDepth(layerOf(asset));
 
     return {
       asset,
@@ -578,9 +591,9 @@ export class PlayclipScene extends Phaser.Scene {
     const image = this.textures.exists(key)
       ? this.add.image(0, 0, key)
       : this.add.image(0, 0, '__MISSING');
-    image.setOrigin(0.5).setDepth(DEPTH_IMAGE);
+    image.setOrigin(0.5).setDepth(layerOf(asset));
 
-    return {
+    const overlay: Overlay = {
       asset,
       root: image,
       clicked: false,
@@ -602,22 +615,33 @@ export class PlayclipScene extends Phaser.Scene {
           image.setScale((0.2 * rect.width) / image.width);
         }
 
+        // Pivot on the anchor (see layoutTextOverlay).
         const c = this.centerOf(asset, rect, orientation);
-        image.setPosition(c.x, c.y);
-
         const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
+        const { ax, ay } = anchorOf(st);
+        const ox = (ax - 0.5) * image.displayWidth;
+        const oy = (ay - 0.5) * image.displayHeight;
+        image.setOrigin(ax, ay);
+        image.setPosition(c.x + ox, c.y + oy);
         image.setAngle(st.rotation || 0);
         image.setFlipX(!!st.flipX);
         image.setFlipY(!!st.flipY);
+        overlay.anchorOffset = { x: ox, y: oy };
       },
     };
+    return overlay;
   }
 
   private buildButton(asset: PlayclipAsset): Overlay {
-    const container = this.add.container(0, 0).setDepth(DEPTH_BUTTON);
+    // Outer container sits on the anchor and takes rotation/scale (so they pivot
+    // there); the inner box holds the drawing, offset back to the centre, and
+    // takes the flip (so mirroring never moves the button).
+    const container = this.add.container(0, 0).setDepth(layerOf(asset));
+    const box = this.add.container(0, 0);
     const graphics = this.add.graphics();
     const label = this.add.text(0, 0, asset.content || '', { fontSize: '20px' }).setOrigin(0.5);
-    container.add([graphics, label]);
+    box.add([graphics, label]);
+    container.add(box);
 
     const overlay: Overlay = {
       asset,
@@ -655,15 +679,21 @@ export class PlayclipScene extends Phaser.Scene {
         }
 
         const c = this.centerOf(asset, rect, orientation);
-        container.setPosition(c.x, c.y);
+        const { ax, ay } = anchorOf(st);
+        const ox = (ax - 0.5) * bw;
+        const oy = (ay - 0.5) * bh;
+        container.setPosition(c.x + ox, c.y + oy);
         container.setSize(bw, bh);
-        // Containers have no setFlipX/Y, so mirror via signed scale.
         container.setAngle(st.rotation || 0);
-        container.setScale(st.flipX ? -1 : 1, st.flipY ? -1 : 1);
+        container.setScale(1, 1);
+        box.setPosition(-ox, -oy);
+        // Containers have no setFlipX/Y, so mirror the inner box via signed scale.
+        box.setScale(st.flipX ? -1 : 1, st.flipY ? -1 : 1);
+        overlay.anchorOffset = { x: ox, y: oy };
 
         // Keep an up-to-date hit area; the actual click is dispatched centrally
         // from onPointerDown (so the first tap can be reserved for "start").
-        const hit = new Phaser.Geom.Rectangle(-bw / 2, -bh / 2, bw, bh);
+        const hit = new Phaser.Geom.Rectangle(-bw / 2 - ox, -bh / 2 - oy, bw, bh);
         if (container.input && container.input.hitArea) {
           container.input.hitArea = hit;
         } else {
@@ -680,7 +710,7 @@ export class PlayclipScene extends Phaser.Scene {
   // renders nothing but occupies a hit region sized from its width/height
   // percentages; the tap is dispatched from onPointerDown like a normal button.
   private buildTransparentButton(asset: PlayclipAsset): Overlay {
-    const container = this.add.container(0, 0).setDepth(DEPTH_TRANSPARENT_BUTTON);
+    const container = this.add.container(0, 0).setDepth(layerOf(asset));
 
     return {
       asset,
@@ -706,7 +736,7 @@ export class PlayclipScene extends Phaser.Scene {
   // window). Background color lives in `content`; optional image in `imageUrl`.
   // Color is always drawn first so transparent PNG regions match the editor.
   private buildEndcard(asset: PlayclipAsset): Overlay {
-    const container = this.add.container(0, 0).setDepth(DEPTH_ENDCARD);
+    const container = this.add.container(0, 0).setDepth(layerOf(asset));
     const imageKey = asset.imageUrl ? `endcard-${asset.id}` : undefined;
     const bgGraphics = this.add.graphics();
     container.add(bgGraphics);
@@ -823,13 +853,15 @@ export class PlayclipScene extends Phaser.Scene {
         visible: boolean;
       };
       if (!node.visible) continue;
-      const halfW = node.displayWidth / 2;
-      const halfH = node.displayHeight / 2;
+      const halfW = Math.abs(node.displayWidth) / 2;
+      const halfH = Math.abs(node.displayHeight) / 2;
+      const cx = node.x - (overlay.anchorOffset?.x ?? 0);
+      const cy = node.y - (overlay.anchorOffset?.y ?? 0);
       if (
-        px >= node.x - halfW &&
-        px <= node.x + halfW &&
-        py >= node.y - halfH &&
-        py <= node.y + halfH
+        px >= cx - halfW &&
+        px <= cx + halfW &&
+        py >= cy - halfH &&
+        py <= cy + halfH
       ) {
         this.activateButton(overlay);
         handled = true;
@@ -1106,7 +1138,7 @@ export class PlayclipScene extends Phaser.Scene {
     const since = this.started
       ? Math.max(0, (this.time.now - Math.max(overlay.appearedAt, this.startedAt)) / 1000)
       : 0;
-    const s = sampleAnimation(style, { sinceStart: since, untilEnd: end - t });
+    const s = sampleAnimation(style, { sinceStart: since, untilEnd: end - t }, overlay.asset.id);
     const k = overlay.designScale;
     const root = overlay.root;
     root.setPosition(base.x + s.x * k, base.y + s.y * k);

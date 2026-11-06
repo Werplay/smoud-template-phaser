@@ -43,6 +43,13 @@ export interface AssetStyle {
   animationSlideDistance?: number;
   gestureSpeed?: number;
   gestureDistance?: number;
+  entryDuration?: number;
+  exitDuration?: number;
+  /** Resting opacity 0–1. */
+  opacity?: number;
+  /** Rotation/scale pivot as % of the box (50/50 = centre). */
+  anchorX?: number;
+  anchorY?: number;
 }
 
 export interface ButtonAction {
@@ -85,6 +92,8 @@ export interface PlayclipAsset {
   landscapeHeightPercentage?: number;
   portraitWidthPercentage?: number;
   portraitHeightPercentage?: number;
+  /** Stacking layer (see animation/layers.ts). */
+  zIndex?: number;
 }
 
 export interface PlayclipVideo {
