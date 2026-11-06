@@ -6,11 +6,29 @@
 // Channels: opacity (multiplier), x / y (design px, screen space),
 // scale (multiplier), rotation (degrees), glow (0..1).
 //
-// Values mirror the editor's CSS keyframes, which are the visual reference.
+// A key may carry the easing of the segment that starts at it (third
+// element); otherwise the preset's easing applies:
+//   'hold'                      keep this value until the next key
+//   'linear' | 'ease' | …       a CSS named timing function
+//   { bezier: [x1,y1,x2,y2] }   a CSS cubic-bezier
+//   { ae: { speedOut, influenceOut, speedIn, influenceIn } }
+//                               After Effects temporal ease
+//
+// Values mirror the editor's original CSS keyframes, the visual reference.
+
+import type { AeEase, CssEasing } from './ease';
 
 export type Channel = 'opacity' | 'x' | 'y' | 'scale' | 'rotation' | 'glow';
 export type KeyValue = number | string;
-export type Track = Array<[t: number, value: KeyValue]>;
+export type KeyEase =
+  | 'hold'
+  | CssEasing
+  | { bezier: [number, number, number, number] }
+  | { ae: AeEase };
+export type Key =
+  | [t: number, value: KeyValue]
+  | [t: number, value: KeyValue, ease: KeyEase];
+export type Track = Key[];
 
 export interface AnimPreset {
   tracks: Partial<Record<Channel, Track>>;
@@ -21,6 +39,12 @@ export interface LoopPreset extends AnimPreset {
   periodMs: number;
   /** Gestures take their cycle length from style.gestureSpeed. */
   gesture?: boolean;
+  /** 'cycle' restarts each period; 'pingpong' plays forward then back (loopOut). */
+  mode?: 'cycle' | 'pingpong';
+  /** Parameter defaults for this preset (e.g. its own default distance). */
+  defaults?: Record<string, number>;
+  /** Procedural motion: seeded noise added to channels, frequency 1/period. */
+  wiggle?: { channels: Channel[]; amp: KeyValue; octaves?: number };
 }
 
 export const ENTRY_PRESETS: Record<string, AnimPreset> = {
@@ -181,14 +205,48 @@ export const EXIT_PRESETS: Record<string, AnimPreset> = {
 };
 
 export const LOOP_PRESETS: Record<string, LoopPreset> = {
-  // CSS: 2s ease-in-out infinite alternate → one full 0→1→0 cycle is 4s.
+  // CSS: 2s ease-in-out infinite alternate.
   glow: {
-    periodMs: 4000,
+    periodMs: 2000,
+    mode: 'pingpong',
     tracks: {
       glow: [
         [0, 0],
-        [0.5, 1],
-        [1, 0],
+        [1, 1],
+      ],
+    },
+  },
+  // Organic jitter (seeded noise, identical in every renderer); speed sets how
+  // often it changes direction, distance sets how far it strays.
+  wiggle: {
+    periodMs: 250,
+    gesture: true,
+    defaults: { dist: 6 },
+    tracks: {},
+    wiggle: { channels: ['x', 'y'], amp: '$dist', octaves: 2 },
+  },
+  // Hold keys: snap between bright and dim instead of fading.
+  blink: {
+    periodMs: 1000,
+    tracks: {
+      opacity: [
+        [0, 1, 'hold'],
+        [0.5, 0.25, 'hold'],
+        [1, 1],
+      ],
+    },
+  },
+  // Two quick beats, then rest; custom curves for a sharp attack.
+  heartbeat: {
+    periodMs: 1200,
+    tracks: {
+      scale: [
+        [0, 1, { bezier: [0.2, 0, 0.2, 1] }],
+        [0.12, 1.15, 'ease-in'],
+        [0.24, 1, { bezier: [0.2, 0, 0.2, 1] }],
+        [0.36, 1.1, 'ease-in'],
+        [0.48, 1],
+        [1, 1],
       ],
     },
   },
