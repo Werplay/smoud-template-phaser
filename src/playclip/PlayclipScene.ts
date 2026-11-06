@@ -3,6 +3,7 @@ import { sdk } from '@smoud/playable-sdk';
 import { PLAYCLIP_DATA } from '../playclip-data';
 import { isEndcardVisible } from './endcard-visibility';
 import { bindHeatmap, track } from './analytics';
+import { sampleAnimation, type AnimStyle } from './animation/sample';
 import {
   computePlaybackTime,
   getPostRollConfig,
@@ -108,21 +109,42 @@ function fontStyleString(style: AssetStyle): string {
   return parts.join(' ') || 'normal';
 }
 
+// The transform calls animation needs; Text, Image and Container all have them.
+type AnimatableRoot = Phaser.GameObjects.GameObject & {
+  x: number;
+  y: number;
+  scaleX: number;
+  scaleY: number;
+  angle: number;
+  setVisible(value: boolean): unknown;
+  setPosition(x: number, y: number): unknown;
+  setScale(x: number, y: number): unknown;
+  setAngle(degrees: number): unknown;
+  setAlpha(value: number): unknown;
+  preFX?: Phaser.GameObjects.Components.FX | null;
+  postFX?: Phaser.GameObjects.Components.FX | null;
+};
+
 // A rendered overlay plus a closure that re-lays-it-out for a given video rect.
 interface Overlay {
   asset: PlayclipAsset;
-  root: Phaser.GameObjects.GameObject & {
-    setVisible(value: boolean): unknown;
-  };
+  root: AnimatableRoot;
   layout: (rect: Rect, orientation: Orientation) => void;
   clicked: boolean;
-  // Visibility tracking for entry/exit animation transitions.
   wasVisible: boolean;
-  // Called when the asset enters its time window (image overlays only).
-  onShow?: () => void;
-  // Called when the asset leaves its time window; invoke done() to actually hide.
-  onHide?: (done: () => void) => void;
+  // Scene time (ms) when the overlay last entered its window; drives entry + loop.
+  appearedAt: number;
+  // Transform produced by layout(); animation offsets are applied on top of it.
+  base?: { x: number; y: number; scaleX: number; scaleY: number; angle: number };
+  // Editor px → screen px, so animation distances keep their designed size.
+  designScale: number;
+  // Glow FX, created on first use; null when the renderer can't do FX.
+  glow?: Phaser.FX.Glow | null;
 }
+
+// Glow preset colour/strength, matching the editor's CSS button glow.
+const GLOW_COLOR = 0x667eea;
+const GLOW_STRENGTH = 4;
 
 // Timeline control (loop / jump / freeze).
 interface Control {
@@ -180,6 +202,8 @@ export class PlayclipScene extends Phaser.Scene {
   private orientation: Orientation = 'landscape';
   // The playable holds on its first frame until the first tap anywhere.
   private started = false;
+  // Scene time (ms) of the first tap; animations hold their first frame before it.
+  private startedAt = 0;
   private posterHeld = false;
   // Completion is signalled to the network SDK exactly once (drives the SDK's
   // end hook, e.g. Mintegral's window.gameEnd()).
@@ -543,6 +567,8 @@ export class PlayclipScene extends Phaser.Scene {
       root: text,
       clicked: false,
       wasVisible: false,
+      appearedAt: 0,
+      designScale: 1,
       layout: (rect, orientation) => this.layoutTextOverlay(text, asset, rect, orientation),
     };
   }
@@ -554,283 +580,14 @@ export class PlayclipScene extends Phaser.Scene {
       : this.add.image(0, 0, '__MISSING');
     image.setOrigin(0.5).setDepth(DEPTH_IMAGE);
 
-    // Base position/scale updated by layout() on every resize.
-    let baseX = 0;
-    let baseY = 0;
-    let baseScaleX = 1;
-    let baseScaleY = 1;
-    // Current video rect — updated by layout() so startLoop() can compute
-    // gesture distances as a percentage of the video dimensions.
-    let layoutRect: Rect = { left: 0, top: 0, width: 0, height: 0 };
-
-    // Resolve CSS easing name to a Phaser ease string.
-    const toEase = (css?: string): string => {
-      const m: Record<string, string> = {
-        linear: 'Linear',
-        'ease-in': 'Sine.easeIn',
-        'ease-out': 'Sine.easeOut',
-        'ease-in-out': 'Sine.easeInOut',
-      };
-      return m[css ?? ''] ?? 'Sine.easeInOut';
-    };
-
-    const getStyle = (): AssetStyle | undefined =>
-      (pickOriented(asset.style, this.orientation) || undefined) as AssetStyle | undefined;
-
-    // Kill all tweens targeting this image (loop + any ongoing transition).
-    const killAll = (): void => {
-      this.tweens.killTweensOf(image);
-    };
-
-    // Reset image to the clean base state (position/scale/alpha/angle/flip).
-    const resetToBase = (): void => {
-      const st = getStyle();
-      image.setPosition(baseX, baseY);
-      image.setScale(baseScaleX, baseScaleY);
-      image.setAlpha(1);
-      image.setAngle(st?.rotation || 0);
-      image.setFlipX(!!st?.flipX);
-      image.setFlipY(!!st?.flipY);
-    };
-
-    // Start an infinite looping animation based on animationStyle.
-    // Default speeds match the CSS animation-duration values defined in css-builder.ts.
-    // gestureSpeed overrides the default when the user has set it explicitly.
-    const startLoop = (): void => {
-      const style = getStyle();
-      const anim = style?.animationStyle;
-      if (!anim || anim === 'none') return;
-
-      // Per-type default durations mirroring the CSS (css-builder.ts hardcoded values).
-      // Gesture animations (tap/swipe/circle) use gestureSpeed; static ones use fixed CSS defaults.
-      const DEFAULT_SPEED: Record<string, number> = {
-        glow: 2000, pulse: 1500, bounce: 800, shake: 500, float: 3000,
-        tap: 1200, swipeLeft: 1400, swipeRight: 1400, swipeUp: 1400, swipeDown: 1400, circle: 2000,
-      };
-      const speed = style?.gestureSpeed ?? DEFAULT_SPEED[anim] ?? 1400;
-      // gestureDistance is treated as % of video rect dimension (width for
-      // horizontal, height for vertical, min-dimension for circle). Tap uses
-      // it as a 0-100 depth %, so it is excluded from the responsive conversion.
-      const distPct = style?.gestureDistance ?? 24;
-      const hDist = (distPct / 100) * layoutRect.width;
-      const vDist = (distPct / 100) * layoutRect.height;
-      const rDist = (distPct / 100) * Math.min(layoutRect.width, layoutRect.height);
-
-      // CSS applies a single ease-in-out to the whole animation; all Phaser tween
-      // segments use the same easing to replicate that behaviour.
-      const E = 'Sine.easeInOut';
-
-      switch (anim) {
-        case 'glow': {
-          // Use Phaser's Glow FX in WebGL; fall back to alpha pulse in Canvas.
-          const glow = image.preFX?.addGlow(0x3b82f6, 4, 0, false);
-          if (glow) {
-            this.tweens.add({ targets: glow, outerStrength: 12, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
-          } else {
-            this.tweens.add({ targets: image, alpha: 0.65, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
-          }
-          break;
-        }
-        case 'pulse':
-          // CSS: scale(1) → scale(1.05) → scale(1), 1.5s ease-in-out
-          this.tweens.add({ targets: image, scaleX: baseScaleX * 1.05, scaleY: baseScaleY * 1.05, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
-          break;
-        case 'bounce':
-          // CSS: translateY(0) → translateY(-5px) → translateY(0), 0.8s ease-in-out
-          this.tweens.add({ targets: image, y: baseY - 5, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
-          break;
-        case 'shake':
-          // CSS keyframes at 0%, 25%, 75%, 100% with hardcoded ±2px, 0.5s ease-in-out
-          this.tweens.chain({
-            loop: -1, tweens: [
-              { targets: image, x: baseX - 2, duration: speed * 0.25, ease: E },
-              { targets: image, x: baseX + 2, duration: speed * 0.5, ease: E },
-              { targets: image, x: baseX, duration: speed * 0.25, ease: E },
-            ]
-          });
-          break;
-        case 'float':
-          // CSS: translateY(0) rotate(0) → translateY(-3px) rotate(1deg) → back, 3s ease-in-out
-          this.tweens.add({ targets: image, y: baseY - 3, angle: 1, duration: speed / 2, yoyo: true, repeat: -1, ease: E });
-          break;
-        case 'tap': {
-          // CSS keyframes at 0%, 40%, 65%, 100%; gestureDistance is 0-100 depth %.
-          // HTML builder converts: --gesture-tap-depth = Math.min(1, gestureDistance / 100)
-          const tapDist = style?.gestureDistance ?? 18;
-          const depth = Math.min(1, tapDist / 100);
-          this.tweens.chain({
-            loop: -1, tweens: [
-              { targets: image, scaleX: baseScaleX * (1 - depth), scaleY: baseScaleY * (1 - depth), duration: speed * 0.4, ease: E },
-              { targets: image, scaleX: baseScaleX * 1.04, scaleY: baseScaleY * 1.04, duration: speed * 0.25, ease: E },
-              { targets: image, scaleX: baseScaleX, scaleY: baseScaleY, duration: speed * 0.35, ease: E },
-            ]
-          });
-          break;
-        }
-        case 'swipeLeft':
-          // CSS keyframes: 0%=0, 60%=-hDist, 100%=0; ease-in-out
-          this.tweens.chain({
-            loop: -1, tweens: [
-              { targets: image, x: baseX - hDist, duration: speed * 0.6, ease: E },
-              { targets: image, x: baseX, duration: speed * 0.4, ease: E },
-            ]
-          });
-          break;
-        case 'swipeRight':
-          // CSS keyframes: 0%=0, 60%=+hDist, 100%=0; ease-in-out
-          this.tweens.chain({
-            loop: -1, tweens: [
-              { targets: image, x: baseX + hDist, duration: speed * 0.6, ease: E },
-              { targets: image, x: baseX, duration: speed * 0.4, ease: E },
-            ]
-          });
-          break;
-        case 'swipeUp':
-          // CSS keyframes: 0%=0, 60%=-vDist, 100%=0; ease-in-out
-          this.tweens.chain({
-            loop: -1, tweens: [
-              { targets: image, y: baseY - vDist, duration: speed * 0.6, ease: E },
-              { targets: image, y: baseY, duration: speed * 0.4, ease: E },
-            ]
-          });
-          break;
-        case 'swipeDown':
-          // CSS keyframes: 0%=0, 60%=+vDist, 100%=0; ease-in-out
-          this.tweens.chain({
-            loop: -1, tweens: [
-              { targets: image, y: baseY + vDist, duration: speed * 0.6, ease: E },
-              { targets: image, y: baseY, duration: speed * 0.4, ease: E },
-            ]
-          });
-          break;
-        case 'circle': {
-          // CSS: linear ease (smooth circular path), keyframes at 0%/25%/50%/75%/100%
-          const r = rDist || 14;
-          this.tweens.chain({
-            loop: -1, tweens: [
-              { targets: image, x: baseX + r, y: baseY - r, duration: speed * 0.25, ease: 'Linear' },
-              { targets: image, x: baseX, y: baseY - r * 1.57, duration: speed * 0.25, ease: 'Linear' },
-              { targets: image, x: baseX - r, y: baseY - r, duration: speed * 0.25, ease: 'Linear' },
-              { targets: image, x: baseX, y: baseY, duration: speed * 0.25, ease: 'Linear' },
-            ]
-          });
-          break;
-        }
-      }
-    };
-
-    // Play a one-shot entry animation; call onComplete when done (or immediately if none).
-    const playEntry = (onComplete: () => void): void => {
-      const style = getStyle();
-      const entry = style?.entryAnimation;
-      if (!entry || entry === 'none') { onComplete(); return; }
-
-      const dur = style?.animationDuration ?? 500;
-      const ease = toEase(style?.animationEasing);
-      const opFrom = style?.animationOpacityFrom ?? 0;
-      const opTo = style?.animationOpacityTo ?? 1;
-      const scFrom = style?.animationScaleFrom ?? 0;
-      const scTo = style?.animationScaleTo ?? 1;
-      const slideDist = style?.animationSlideDistance ?? 100;
-
-      switch (entry) {
-        case 'fadeIn':
-          image.setAlpha(opFrom);
-          this.tweens.add({ targets: image, alpha: opTo, duration: dur, ease, onComplete });
-          break;
-        case 'slideInLeft':
-          image.setAlpha(0.6).setPosition(baseX - slideDist, baseY);
-          this.tweens.add({ targets: image, x: baseX, alpha: 1, duration: dur, ease, onComplete });
-          break;
-        case 'slideInRight':
-          image.setAlpha(0.6).setPosition(baseX + slideDist, baseY);
-          this.tweens.add({ targets: image, x: baseX, alpha: 1, duration: dur, ease, onComplete });
-          break;
-        case 'slideInTop':
-          image.setAlpha(0.6).setPosition(baseX, baseY - slideDist);
-          this.tweens.add({ targets: image, y: baseY, alpha: 1, duration: dur, ease, onComplete });
-          break;
-        case 'slideInBottom':
-          image.setAlpha(0.6).setPosition(baseX, baseY + slideDist);
-          this.tweens.add({ targets: image, y: baseY, alpha: 1, duration: dur, ease, onComplete });
-          break;
-        case 'scaleIn':
-          image.setAlpha(0.5).setScale(baseScaleX * scFrom, baseScaleY * scFrom);
-          this.tweens.add({ targets: image, scaleX: baseScaleX * scTo, scaleY: baseScaleY * scTo, alpha: 1, duration: dur, ease, onComplete });
-          break;
-        case 'bounceIn':
-          image.setAlpha(0).setScale(baseScaleX * scFrom, baseScaleY * scFrom);
-          this.tweens.add({ targets: image, scaleX: baseScaleX * scTo, scaleY: baseScaleY * scTo, alpha: 1, duration: dur, ease: 'Bounce.easeOut', onComplete });
-          break;
-        default:
-          onComplete();
-      }
-    };
-
-    // Play a one-shot exit animation; call done() when the image should be hidden.
-    const playExit = (done: () => void): void => {
-      const style = getStyle();
-      const exit = style?.exitAnimation;
-      if (!exit || exit === 'none') { done(); return; }
-
-      const dur = style?.animationDuration ?? 500;
-      const ease = toEase(style?.animationEasing);
-      const opTo = style?.animationOpacityTo ?? 0;
-      const scTo = style?.animationScaleTo ?? 0;
-      const slideDist = style?.animationSlideDistance ?? 100;
-
-      switch (exit) {
-        case 'fadeOut':
-          this.tweens.add({ targets: image, alpha: opTo, duration: dur, ease, onComplete: done });
-          break;
-        case 'slideOutLeft':
-          this.tweens.add({ targets: image, x: baseX - slideDist, alpha: 0.6, duration: dur, ease, onComplete: done });
-          break;
-        case 'slideOutRight':
-          this.tweens.add({ targets: image, x: baseX + slideDist, alpha: 0.6, duration: dur, ease, onComplete: done });
-          break;
-        case 'slideOutTop':
-          this.tweens.add({ targets: image, y: baseY - slideDist, alpha: 0.6, duration: dur, ease, onComplete: done });
-          break;
-        case 'slideOutBottom':
-          this.tweens.add({ targets: image, y: baseY + slideDist, alpha: 0.6, duration: dur, ease, onComplete: done });
-          break;
-        case 'scaleOut':
-          this.tweens.add({ targets: image, scaleX: baseScaleX * scTo, scaleY: baseScaleY * scTo, alpha: 0.5, duration: dur, ease, onComplete: done });
-          break;
-        default:
-          done();
-      }
-    };
-
-    // Build the overlay; layout is assigned after so it can close over `overlay`.
-    const overlay: Overlay = {
+    return {
       asset,
       root: image,
       clicked: false,
       wasVisible: false,
-
-      onShow: () => {
-        // Cancel any in-flight tweens (e.g. a stale exit animation), reset to
-        // the clean base state, then play the entry anim and start the loop.
-        killAll();
-        resetToBase();
-        playEntry(() => startLoop());
-      },
-
-      onHide: (done) => {
-        // Stop the looping animation, then play the exit anim before hiding.
-        // If onShow is called before done() fires, killAll() in onShow kills the
-        // exit tween so done() (and therefore setVisible(false)) never runs.
-        killAll();
-        playExit(done);
-      },
-
+      appearedAt: 0,
+      designScale: 1,
       layout: (rect, orientation) => {
-        // Kill every tween first — both loop and any in-flight transition tween.
-        killAll();
-
-        // Existing responsiveness logic (unchanged).
         const wPct = this.widthPct(asset, orientation);
         const hPct = this.heightPct(asset, orientation);
         const w = wPct ? wPct * rect.width : undefined;
@@ -848,33 +605,12 @@ export class PlayclipScene extends Phaser.Scene {
         const c = this.centerOf(asset, rect, orientation);
         image.setPosition(c.x, c.y);
 
-        // Update base values that animations use as their origin.
-        baseX = c.x;
-        baseY = c.y;
-        baseScaleX = image.scaleX;
-        baseScaleY = image.scaleY;
-        layoutRect = rect;
-
-        // Reset any animated state so the image is clean after a resize, then
-        // re-apply the asset's static rotation/flip for this orientation.
         const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
-        image.setAlpha(1).setAngle(st.rotation || 0);
+        image.setAngle(st.rotation || 0);
         image.setFlipX(!!st.flipX);
         image.setFlipY(!!st.flipY);
-
-        // Re-derive whether this asset should be visible right now (recovers from
-        // any killed exit-animation that never called setVisible(false)).
-        const t = (this.video?.getCurrentTime?.() ?? 0) as number;
-        const within = t >= asset.time && t <= (asset.endTime || asset.time + 5);
-        image.setVisible(within);
-        overlay.wasVisible = within;
-
-        // Restart the loop animation at the new base position if visible.
-        if (within) startLoop();
       },
     };
-
-    return overlay;
   }
 
   private buildButton(asset: PlayclipAsset): Overlay {
@@ -888,6 +624,8 @@ export class PlayclipScene extends Phaser.Scene {
       root: container,
       clicked: false,
       wasVisible: false,
+      appearedAt: 0,
+      designScale: 1,
       layout: (rect, orientation) => {
         const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
 
@@ -949,6 +687,8 @@ export class PlayclipScene extends Phaser.Scene {
       root: container,
       clicked: false,
       wasVisible: false,
+      appearedAt: 0,
+      designScale: 1,
       layout: (rect, orientation) => {
         const wPct = this.widthPct(asset, orientation);
         const hPct = this.heightPct(asset, orientation);
@@ -984,6 +724,8 @@ export class PlayclipScene extends Phaser.Scene {
       root: container,
       clicked: false,
       wasVisible: false,
+      appearedAt: 0,
+      designScale: 1,
       layout: (rect, _orientation) => {
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
@@ -1106,6 +848,7 @@ export class PlayclipScene extends Phaser.Scene {
   private startPlayback(): void {
     if (this.started) return;
     this.started = true;
+    this.startedAt = this.time.now;
     this.posterHeld = false;
     if (this.video) {
       this.video.setMute(false);
@@ -1323,23 +1066,17 @@ export class PlayclipScene extends Phaser.Scene {
       const end = overlay.asset.endTime || overlay.asset.time + 5;
       const within = t >= start && t <= end;
 
-      // Transition-based visibility: only act on state changes so that image
-      // overlays can play entry/exit animations instead of snapping.
+      // Entry, loop and exit all happen inside the asset's window (the exit
+      // plays in its last animationDuration), so visibility is just the window.
       if (within && !overlay.wasVisible) {
         overlay.wasVisible = true;
+        overlay.appearedAt = this.time.now;
         overlay.root.setVisible(true);
-        overlay.onShow?.();
       } else if (!within && overlay.wasVisible) {
         overlay.wasVisible = false;
-        if (overlay.onHide) {
-          // Image overlays play an exit animation; done() hides the image.
-          // If onShow fires before done() runs, killAll() in onShow kills the
-          // exit tween so done() never fires — no spurious hide.
-          overlay.onHide(() => overlay.root.setVisible(false));
-        } else {
-          overlay.root.setVisible(false);
-        }
+        overlay.root.setVisible(false);
       }
+      if (overlay.wasVisible) this.animateOverlay(overlay, t, end);
 
       // Re-arm an interactive overlay once it leaves its window so it can be
       // pressed again if its time range comes back around (e.g. a looping intro).
@@ -1347,6 +1084,47 @@ export class PlayclipScene extends Phaser.Scene {
     }
 
     this.updateEndcardVisibility(t);
+  }
+
+  // --- Animation -----------------------------------------------------------
+
+  private captureBase(overlay: Overlay): void {
+    const r = overlay.root;
+    overlay.base = { x: r.x, y: r.y, scaleX: r.scaleX, scaleY: r.scaleY, angle: r.angle };
+    const style = (pickOriented(overlay.asset.style, this.orientation) || {}) as AssetStyle;
+    const design = this.designVideoBounds(overlay.asset, this.orientation, style, this.videoRect);
+    overlay.designScale = design.width > 0 ? this.videoRect.width / design.width : 1;
+  }
+
+  // Apply the shared animation engine's sample for this frame (see
+  // ./animation/sample.ts — the same code drives the editor and preview).
+  private animateOverlay(overlay: Overlay, t: number, end: number): void {
+    const base = overlay.base;
+    if (!base) return;
+    const style = pickOriented(overlay.asset.style, this.orientation) as AnimStyle | undefined;
+    // Before the first tap the ad shows a poster: hold animations at frame 0.
+    const since = this.started
+      ? Math.max(0, (this.time.now - Math.max(overlay.appearedAt, this.startedAt)) / 1000)
+      : 0;
+    const s = sampleAnimation(style, { sinceStart: since, untilEnd: end - t });
+    const k = overlay.designScale;
+    const root = overlay.root;
+    root.setPosition(base.x + s.x * k, base.y + s.y * k);
+    root.setScale(base.scaleX * s.scale, base.scaleY * s.scale);
+    root.setAngle(base.angle + s.rotation);
+    root.setAlpha(s.opacity);
+    this.applyGlow(overlay, s.glow);
+  }
+
+  private applyGlow(overlay: Overlay, amount: number): void {
+    if (overlay.glow === null) return; // renderer has no FX (Canvas)
+    if (!overlay.glow) {
+      if (amount <= 0) return;
+      const fx = overlay.root.preFX ?? overlay.root.postFX;
+      overlay.glow = fx ? fx.addGlow(GLOW_COLOR, 0, 0, false) : null;
+      if (!overlay.glow) return;
+    }
+    overlay.glow.outerStrength = amount * GLOW_STRENGTH;
   }
 
   private updateEndcardVisibility(time: number): void {
@@ -1464,7 +1242,14 @@ export class PlayclipScene extends Phaser.Scene {
     this.orientation = this.computeOrientation();
     this.maybeSwapVideoSource();
     this.layoutVideo();
-    this.overlays.forEach((overlay) => overlay.layout(this.videoRect, this.orientation));
+    this.overlays.forEach((overlay) => {
+      // Layout sets position/size/angle; reset what it may leave untouched
+      // (Text has no layout-driven scale) so the captured base is clean.
+      overlay.root.setScale(1, 1);
+      overlay.root.setAlpha(1);
+      overlay.layout(this.videoRect, this.orientation);
+      this.captureBase(overlay);
+    });
     this.endcardOverlay?.layout(this.videoRect, this.orientation);
     this.updateCropMask();
   };
