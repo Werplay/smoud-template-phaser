@@ -2,6 +2,7 @@ import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { PLAYCLIP_DATA } from '../playclip-data';
 import { isEndcardVisible } from './endcard-visibility';
+import { bindHeatmap, track } from './analytics';
 import {
   computePlaybackTime,
   getPostRollConfig,
@@ -295,6 +296,8 @@ export class PlayclipScene extends Phaser.Scene {
     this.input.on('pointerdown', this.onPointerDown, this);
 
     sdk.start();
+    bindHeatmap();
+    track('gameReady');
   }
 
   // --- Orientation & video ------------------------------------------------
@@ -1047,6 +1050,7 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   private activateEndcard(): void {
+    track('ctaCall', { element_id: 'endcard' });
     sdk.install();
     this.finishAd();
   }
@@ -1128,6 +1132,10 @@ export class PlayclipScene extends Phaser.Scene {
 
     const v = this.video;
     const action = overlay.asset.buttonAction;
+    track(action?.type === 'cta' ? 'ctaCall' : 'click', {
+      element_id: overlay.asset.id,
+      element_content: overlay.asset.content,
+    });
 
     // Pressing any button breaks out of an active freeze and resumes playback.
     // The freeze stays in triggeredFreezes so it won't immediately re-trap as the
