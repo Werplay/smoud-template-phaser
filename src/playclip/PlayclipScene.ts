@@ -6,6 +6,19 @@ import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
 import { layerOf } from './animation/layers';
 import {
+  colorInt,
+  DROP_SHADOW_BLUR_SCALE,
+  glowOf,
+  gradientLine,
+  gradientOf,
+  rgba,
+  shadowOf,
+  shadowOffset,
+  strokeOf,
+  stylePadding,
+  type GlowStyle,
+} from './animation/styles';
+import {
   computePlaybackTime,
   getPostRollConfig,
   isPostRollComplete,
@@ -94,6 +107,59 @@ function anchorOf(style: AssetStyle): { ax: number; ay: number } {
   return { ax: (style.anchorX ?? 50) / 100, ay: (style.anchorY ?? 50) / 100 };
 }
 
+// --- Layer styles drawn with the 2D canvas --------------------------------
+// The canvas shadow model (colour, blur, offset) is CSS's, so shadows/glows
+// drawn this way match the editor's CSS box-shadow / drop-shadow.
+
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+// Draw only the shadow of a shape, not the shape, so translucent pixels
+// aren't darkened by drawing the shape twice. The shape is drawn into the right
+// half of a double-width scratch canvas with its shadow offset into the left
+// half, which is then copied over. (Drawing the shape off-canvas instead fails:
+// browsers skip drawImage calls outside the canvas, shadow included.)
+let scratch: HTMLCanvasElement | undefined;
+function shadowPass(
+  ctx: CanvasRenderingContext2D,
+  color: string,
+  blur: number,
+  ox: number,
+  oy: number,
+  draw: (target: CanvasRenderingContext2D, dx: number) => void,
+): void {
+  const w = ctx.canvas.width;
+  const h = ctx.canvas.height;
+  scratch ??= document.createElement('canvas');
+  scratch.width = w * 2;
+  scratch.height = h;
+  const s = scratch.getContext('2d')!;
+  s.clearRect(0, 0, w * 2, h);
+  s.save();
+  s.shadowColor = color;
+  s.shadowBlur = blur;
+  s.shadowOffsetX = ox - w;
+  s.shadowOffsetY = oy;
+  draw(s, w);
+  s.restore();
+  ctx.drawImage(scratch, 0, 0, w, h, 0, 0, w, h);
+}
+
 function cssColorToInt(color: string | undefined): number | undefined {
   if (!color) return undefined;
   try {
@@ -147,6 +213,11 @@ interface Overlay {
   // root position minus the box centre: the anchor (pivot) offset, so taps
   // still hit-test against the drawn box.
   anchorOffset?: Vec2;
+  // The drawn box when the texture is padded for shadows/glows (hit-testing).
+  hitSize?: { w: number; h: number };
+  // Outer-glow layer style FX (text), recreated when colour/size change.
+  styleGlowFx?: Phaser.FX.Glow;
+  styleGlowKey?: string;
   // Glow FX, created on first use; null when the renderer can't do FX.
   glow?: Phaser.FX.Glow | null;
 }
@@ -546,6 +617,38 @@ export class PlayclipScene extends Phaser.Scene {
     text.setWordWrapWidth(Math.max(1, box.width - scaledPadX * 2), true);
     text.setFixedSize(box.width, box.height);
 
+    // Layer styles: native canvas text stroke/shadow (glyph-shaped, like the
+    // editor's -webkit-text-stroke / text-shadow), gradient letters, FX glow.
+    if (st.stroke) {
+      const s = strokeOf(st.stroke);
+      text.setStroke(s.color, s.width * scale);
+    } else {
+      text.setStroke('#000000', 0);
+    }
+    if (st.shadow) {
+      const d = shadowOf(st.shadow);
+      const o = shadowOffset(d.angle, d.distance * scale);
+      text.setShadow(o.x, o.y, rgba(d.color, d.opacity), d.blur * scale, true, true);
+    } else {
+      text.setShadow(0, 0, '#000000', 0, false, false);
+    }
+    if (st.gradient) {
+      const g = gradientOf(st.gradient);
+      // Span the content area (inside the padding), like the editor's block span.
+      const cw = Math.max(1, text.width - scaledPadX * 2);
+      const ch = Math.max(1, text.height - scaledPadY * 2);
+      const line = gradientLine(g.angle, cw, ch);
+      const fill = text.context.createLinearGradient(
+        scaledPadX + line.x0,
+        scaledPadY + line.y0,
+        scaledPadX + line.x1,
+        scaledPadY + line.y1,
+      );
+      fill.addColorStop(0, g.from);
+      fill.addColorStop(1, g.to);
+      text.setFill(fill);
+    }
+
     // Pivot on the anchor: move the origin there and shift the position so
     // the box stays where it was. Flip mirrors the texture in place.
     const c = this.centerOf(asset, rect, orientation);
@@ -558,7 +661,44 @@ export class PlayclipScene extends Phaser.Scene {
     text.setFlipX(!!st.flipX);
     text.setFlipY(!!st.flipY);
     const overlay = this.overlays.find((o) => o.root === text);
-    if (overlay) overlay.anchorOffset = { x: ox, y: oy };
+    if (overlay) {
+      overlay.anchorOffset = { x: ox, y: oy };
+      this.syncStyleGlow(overlay, text, st.outerGlow, scale);
+    }
+  }
+
+  // Outer glow for text via the Glow FX (WebGL); its radius is fixed when
+  // created, so recreate it when the colour or size changes.
+  private syncStyleGlow(
+    overlay: Overlay,
+    target: Phaser.GameObjects.Text,
+    glow: GlowStyle | undefined,
+    k: number,
+  ): void {
+    const fx = target.preFX;
+    if (!fx) return;
+    const g = glow ? glowOf(glow) : undefined;
+    const key = g ? `${g.color}|${Math.round(g.size * k)}` : '';
+    if (overlay.styleGlowKey !== key) {
+      if (overlay.styleGlowFx) fx.remove(overlay.styleGlowFx);
+      overlay.styleGlowFx = g
+        ? fx.addGlow(colorInt(g.color), 0, 0, false, 0.1, Math.max(1, Math.round(g.size * k)))
+        : undefined;
+      overlay.styleGlowKey = key;
+    }
+    if (overlay.styleGlowFx && g) overlay.styleGlowFx.outerStrength = 2 * g.opacity;
+  }
+
+  // A canvas texture for an overlay's styled drawing, reused across layouts.
+  private styleCanvas(key: string, w: number, h: number): Phaser.Textures.CanvasTexture {
+    const width = Math.max(1, Math.ceil(w));
+    const height = Math.max(1, Math.ceil(h));
+    let tex = this.textures.exists(key)
+      ? (this.textures.get(key) as Phaser.Textures.CanvasTexture)
+      : this.textures.createCanvas(key, width, height)!;
+    if (tex.width !== width || tex.height !== height) tex.setSize(width, height);
+    tex.context.clearRect(0, 0, width, height);
+    return tex;
   }
 
   private buildText(asset: PlayclipAsset): Overlay {
@@ -601,6 +741,9 @@ export class PlayclipScene extends Phaser.Scene {
       appearedAt: 0,
       designScale: 1,
       layout: (rect, orientation) => {
+        // Start from the source texture: a previous layout may have swapped in
+        // a styled (shadow/glow) canvas.
+        image.setTexture(this.textures.exists(key) ? key : '__MISSING');
         const wPct = this.widthPct(asset, orientation);
         const hPct = this.heightPct(asset, orientation);
         const w = wPct ? wPct * rect.width : undefined;
@@ -619,9 +762,43 @@ export class PlayclipScene extends Phaser.Scene {
         const c = this.centerOf(asset, rect, orientation);
         const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
         const { ax, ay } = anchorOf(st);
-        const ox = (ax - 0.5) * image.displayWidth;
-        const oy = (ay - 0.5) * image.displayHeight;
-        image.setOrigin(ax, ay);
+        const boxW = image.displayWidth;
+        const boxH = image.displayHeight;
+        const ox = (ax - 0.5) * boxW;
+        const oy = (ay - 0.5) * boxH;
+
+        // Layer styles: redraw the image with its shadow/glow into a padded
+        // canvas (alpha-shaped, like the editor's filter: drop-shadow).
+        overlay.hitSize = undefined;
+        if ((st.shadow || st.outerGlow) && this.textures.exists(key)) {
+          const design = this.designVideoBounds(asset, orientation, st, rect);
+          const k = design.width > 0 ? rect.width / design.width : 1;
+          // Image shadows are drop-shadows in the editor: blur is a std. deviation.
+          const blurK = k * DROP_SHADOW_BLUR_SCALE;
+          const pad = stylePadding(st, k, DROP_SHADOW_BLUR_SCALE);
+          const tex = this.styleCanvas(`fx-${key}`, boxW + pad * 2, boxH + pad * 2);
+          const ctx = tex.context;
+          const src = this.textures.get(key).getSourceImage() as CanvasImageSource;
+          const drawAt = (target: CanvasRenderingContext2D, dx: number) =>
+            target.drawImage(src, pad + dx, pad, boxW, boxH);
+          if (st.outerGlow) {
+            const g = glowOf(st.outerGlow);
+            shadowPass(ctx, rgba(g.color, g.opacity), g.size * blurK, 0, 0, drawAt);
+          }
+          if (st.shadow) {
+            const d = shadowOf(st.shadow);
+            const o = shadowOffset(d.angle, d.distance * k);
+            shadowPass(ctx, rgba(d.color, d.opacity), d.blur * blurK, o.x, o.y, drawAt);
+          }
+          drawAt(ctx, 0);
+          tex.refresh();
+          image.setTexture(tex.key);
+          image.setDisplaySize(tex.width, tex.height);
+          image.setOrigin((pad + ax * boxW) / tex.width, (pad + ay * boxH) / tex.height);
+          overlay.hitSize = { w: boxW, h: boxH };
+        } else {
+          image.setOrigin(ax, ay);
+        }
         image.setPosition(c.x + ox, c.y + oy);
         image.setAngle(st.rotation || 0);
         image.setFlipX(!!st.flipX);
@@ -639,6 +816,9 @@ export class PlayclipScene extends Phaser.Scene {
     const container = this.add.container(0, 0).setDepth(layerOf(asset));
     const box = this.add.container(0, 0);
     const graphics = this.add.graphics();
+    // Canvas-drawn background, used instead of `graphics` when the button has
+    // layer styles (shadow, glow, gradient).
+    let styledBg: Phaser.GameObjects.Image | undefined;
     const label = this.add.text(0, 0, asset.content || '', { fontSize: '20px' }).setOrigin(0.5);
     box.add([graphics, label]);
     container.add(box);
@@ -660,6 +840,12 @@ export class PlayclipScene extends Phaser.Scene {
           color: st.color || '#ffffff',
           fontStyle: fontStyleString(st),
         });
+        if (st.stroke) {
+          const sk = strokeOf(st.stroke);
+          label.setStroke(sk.color, sk.width);
+        } else {
+          label.setStroke('#000000', 0);
+        }
 
         const padX = firstNumber(st.padding, 16) || 16;
         const padY = Math.max(8, padX * 0.6);
@@ -670,12 +856,65 @@ export class PlayclipScene extends Phaser.Scene {
         const radius = firstNumber(st.borderRadius, 8);
 
         graphics.clear();
-        graphics.fillStyle(cssColorToInt(st.backgroundColor) ?? 0x6d28d9, 1);
-        graphics.fillRoundedRect(-bw / 2, -bh / 2, bw, bh, radius);
+        const fillColor = cssColorToInt(st.backgroundColor) ?? 0x6d28d9;
         const borderColor = cssColorToInt(st.borderColor);
-        if (borderColor !== undefined) {
-          graphics.lineStyle(firstNumber(st.borderWidth, 2), borderColor, 1);
-          graphics.strokeRoundedRect(-bw / 2, -bh / 2, bw, bh, radius);
+        const borderWidth = firstNumber(st.borderWidth, 2);
+        if (st.shadow || st.outerGlow || st.gradient) {
+          // Layer styles: draw glow → shadow → fill (colour or gradient) →
+          // border into a padded canvas; canvas shadows follow CSS box-shadow.
+          const pad = stylePadding(st, 1);
+          const tex = this.styleCanvas(`fx-btn-${asset.id}`, bw + pad * 2, bh + pad * 2);
+          const ctx = tex.context;
+          const shape = (target: CanvasRenderingContext2D, dx: number) => {
+            roundRectPath(target, pad + dx, pad, bw, bh, radius);
+            target.fillStyle = '#000';
+            target.fill();
+          };
+          if (st.outerGlow) {
+            const g = glowOf(st.outerGlow);
+            shadowPass(ctx, rgba(g.color, g.opacity), g.size, 0, 0, shape);
+          }
+          if (st.shadow) {
+            const d = shadowOf(st.shadow);
+            const o = shadowOffset(d.angle, d.distance);
+            shadowPass(ctx, rgba(d.color, d.opacity), d.blur, o.x, o.y, shape);
+          }
+          roundRectPath(ctx, pad, pad, bw, bh, radius);
+          if (st.gradient) {
+            const g = gradientOf(st.gradient);
+            const line = gradientLine(g.angle, bw, bh);
+            const fill = ctx.createLinearGradient(
+              pad + line.x0,
+              pad + line.y0,
+              pad + line.x1,
+              pad + line.y1,
+            );
+            fill.addColorStop(0, g.from);
+            fill.addColorStop(1, g.to);
+            ctx.fillStyle = fill;
+          } else {
+            ctx.fillStyle = st.backgroundColor || '#6d28d9';
+          }
+          ctx.fill();
+          if (borderColor !== undefined) {
+            ctx.lineWidth = borderWidth;
+            ctx.strokeStyle = st.borderColor!;
+            ctx.stroke();
+          }
+          tex.refresh();
+          if (!styledBg) {
+            styledBg = this.add.image(0, 0, tex.key);
+            box.addAt(styledBg, 0);
+          }
+          styledBg.setTexture(tex.key).setOrigin(0.5).setVisible(true);
+        } else {
+          styledBg?.setVisible(false);
+          graphics.fillStyle(fillColor, 1);
+          graphics.fillRoundedRect(-bw / 2, -bh / 2, bw, bh, radius);
+          if (borderColor !== undefined) {
+            graphics.lineStyle(borderWidth, borderColor, 1);
+            graphics.strokeRoundedRect(-bw / 2, -bh / 2, bw, bh, radius);
+          }
         }
 
         const c = this.centerOf(asset, rect, orientation);
@@ -853,8 +1092,8 @@ export class PlayclipScene extends Phaser.Scene {
         visible: boolean;
       };
       if (!node.visible) continue;
-      const halfW = Math.abs(node.displayWidth) / 2;
-      const halfH = Math.abs(node.displayHeight) / 2;
+      const halfW = (overlay.hitSize?.w ?? Math.abs(node.displayWidth)) / 2;
+      const halfH = (overlay.hitSize?.h ?? Math.abs(node.displayHeight)) / 2;
       const cx = node.x - (overlay.anchorOffset?.x ?? 0);
       const cy = node.y - (overlay.anchorOffset?.y ?? 0);
       if (

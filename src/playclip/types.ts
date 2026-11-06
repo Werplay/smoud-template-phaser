@@ -3,6 +3,8 @@
 // (assets are wrapped as { id, type, values }), but only the fields the scene
 // actually consumes are typed here.
 
+import type { GlowStyle, GradientStyle, ShadowStyle, StrokeStyle } from './animation/styles';
+
 export type Orientation = 'portrait' | 'landscape';
 
 export interface Vec2 {
@@ -50,6 +52,11 @@ export interface AssetStyle {
   /** Rotation/scale pivot as % of the box (50/50 = centre). */
   anchorX?: number;
   anchorY?: number;
+  /** Layer styles (see animation/styles.ts); absent = off. */
+  shadow?: ShadowStyle;
+  outerGlow?: GlowStyle;
+  stroke?: StrokeStyle;
+  gradient?: GradientStyle;
 }
 
 export interface ButtonAction {
