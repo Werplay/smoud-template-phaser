@@ -5,6 +5,7 @@ import { isEndcardVisible } from './endcard-visibility';
 import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
 import { layerOf } from './animation/layers';
+import { hasTapActions, runActions, tapActions } from './animation/interactions';
 import {
   isPingPong,
   reverseEndVideoTime,
@@ -1231,7 +1232,7 @@ export class PlayclipScene extends Phaser.Scene {
     return (
       overlay.asset.type === 'button' ||
       overlay.asset.type === 'transparent-button' ||
-      (overlay.asset.type === 'image' && !!overlay.asset.buttonAction)
+      (overlay.asset.type === 'image' && hasTapActions(overlay.asset))
     );
   }
 
@@ -1354,8 +1355,8 @@ export class PlayclipScene extends Phaser.Scene {
     overlay.clicked = true;
 
     const v = this.video;
-    const action = overlay.asset.buttonAction;
-    track(action?.type === 'cta' ? 'ctaCall' : 'click', {
+    const actions = tapActions(overlay.asset);
+    track(actions.some((a) => a.kind === 'cta') ? 'ctaCall' : 'click', {
       element_id: overlay.asset.id,
       element_content: overlay.asset.content,
     });
@@ -1368,52 +1369,51 @@ export class PlayclipScene extends Phaser.Scene {
       v.setPaused(false);
     }
 
-    if (action?.type === 'seek' && typeof action.seekTime === 'number' && v) {
-      // Seeking outside an active loop/jump breaks out of it (mirrors the HTML
-      // runtime's handleButtonClick loop-breakout behaviour).
-      if (
-        this.currentLoop &&
-        (action.seekTime < this.currentLoop.startTime ||
-          action.seekTime > this.currentLoop.endTime)
-      ) {
-        this.currentLoop = null;
-      }
-      this.currentJump = null;
-      this.seekSrc(v, action.seekTime);
-      // Re-baseline so the seek isn't read as a frame-by-frame freeze crossing.
-      this.lastFreezeTime = action.seekTime;
-      v.setPaused(false);
-      return;
-    }
-
-    if (action?.type === 'cta') {
-      // Hand off to the network SDK's store routing. Per-playable store links are
-      // baked into build.json at build time.
-      sdk.install();
-      // A CTA press also completes the playable — signal end so networks that
-      // wait for it (e.g. Mintegral's window.gameEnd()) are notified even when the
-      // user converts before the clip plays out.
-      this.finishAd();
-      return;
-    }
-
-    // 'play' (or unspecified): advance so the video continues past the button.
-    // If a loop is currently holding the playhead inside the button's window,
-    // break out of it by seeking just past the loop end — otherwise the loop
-    // would immediately re-engage (it re-activates whenever the playhead is in
-    // range) and the button would never leave its time window.
-    if (v) {
-      if (this.currentLoop) {
-        const resumeAt = this.currentLoop.endTime + 0.001;
-        this.currentLoop = null;
-        // Past the loop end, so also past a ping-pong loop's reversed copy.
-        this.seekSrc(v, resumeAt);
-        // Re-baseline so the loop-breakout seek isn't read as a freeze crossing.
-        this.lastFreezeTime = resumeAt;
-      }
-      this.currentJump = null;
-      v.setPaused(false);
-    }
+    // A button with no actions behaves as 'play' (as before).
+    runActions(actions.length ? actions : [{ kind: 'play' }], {
+      seek: (t) => {
+        if (!v) return;
+        // Seeking outside an active loop/jump breaks out of it (mirrors the
+        // HTML runtime's handleButtonClick loop-breakout behaviour).
+        if (
+          this.currentLoop &&
+          (t < this.currentLoop.startTime || t > this.currentLoop.endTime)
+        ) {
+          this.currentLoop = null;
+        }
+        this.currentJump = null;
+        this.seekSrc(v, t);
+        // Re-baseline so the seek isn't read as a frame-by-frame freeze crossing.
+        this.lastFreezeTime = t;
+        v.setPaused(false);
+      },
+      cta: () => {
+        // Hand off to the network SDK's store routing. Per-playable store links
+        // are baked into build.json at build time.
+        sdk.install();
+        // A CTA press also completes the playable — signal end so networks that
+        // wait for it (e.g. Mintegral's window.gameEnd()) are notified even when
+        // the user converts before the clip plays out.
+        this.finishAd();
+      },
+      play: () => {
+        // Advance so the video continues past the button. If a loop is holding
+        // the playhead inside the button's window, break out of it by seeking
+        // just past the loop end — otherwise it would re-engage at once and the
+        // button would never leave its time window.
+        if (!v) return;
+        if (this.currentLoop) {
+          const resumeAt = this.currentLoop.endTime + 0.001;
+          this.currentLoop = null;
+          // Past the loop end, so also past a ping-pong loop's reversed copy.
+          this.seekSrc(v, resumeAt);
+          // Re-baseline so the loop-breakout seek isn't read as a freeze crossing.
+          this.lastFreezeTime = resumeAt;
+        }
+        this.currentJump = null;
+        v.setPaused(false);
+      },
+    });
   }
 
   // --- Audio playback -----------------------------------------------------
