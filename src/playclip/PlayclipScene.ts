@@ -6,6 +6,13 @@ import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
 import { layerOf } from './animation/layers';
 import {
+  activeTextAnimator,
+  sampleTextUnit,
+  TEXT_ANIMATORS,
+  textAnimatorDone,
+  type TextAnimatorStyle,
+} from './animation/text';
+import {
   DESIGN_SCREEN,
   stageLayout,
   type OrientationFrames,
@@ -226,6 +233,17 @@ interface Overlay {
   styleGlowKey?: string;
   // Glow FX, created on first use; null when the renderer can't do FX.
   glow?: Phaser.FX.Glow | null;
+  // Text animator: crops of the styled text's own texture, one per
+  // character/word, shown in place of the text while it reveals.
+  textUnits?: TextUnits;
+}
+
+interface TextUnits {
+  container: Phaser.GameObjects.Container;
+  units: Array<{ img: Phaser.GameObjects.Image; i: number; y: number }>;
+  n: number;
+  fontPx: number;
+  style: TextAnimatorStyle;
 }
 
 // Glow preset colour/strength, matching the editor's CSS button glow.
@@ -730,6 +748,115 @@ export class PlayclipScene extends Phaser.Scene {
     if (overlay) {
       overlay.anchorOffset = { x: ox, y: oy };
       this.syncStyleGlow(overlay, text, st.outerGlow, scale);
+      this.layoutTextUnits(overlay, text, st as TextAnimatorStyle, fontSize);
+    }
+  }
+
+  // Split the laid-out text into per-unit crops of its texture. Each line is
+  // cut into contiguous spans at the units' starts (measured as Phaser draws
+  // them), so together the crops are exactly the text's pixels — stroke,
+  // shadow and gradient included.
+  private layoutTextUnits(
+    overlay: Overlay,
+    text: Phaser.GameObjects.Text,
+    st: TextAnimatorStyle,
+    fontPx: number,
+  ): void {
+    overlay.textUnits?.container.destroy();
+    overlay.textUnits = undefined;
+    const preset = activeTextAnimator(st);
+    if (!preset) return;
+    const kind = TEXT_ANIMATORS[preset].unit;
+    const style = text.style;
+    const ctx = text.context;
+    style.syncFont(text.canvas, ctx);
+    const measure = (s: string) => ctx.measureText(s).width;
+    const lines = text.getWrappedText();
+    const pad = {
+      left: text.padding.left ?? 0,
+      right: text.padding.right ?? 0,
+      top: text.padding.top ?? 0,
+    };
+    const stroke = style.strokeThickness;
+    // As GetTextSize: a space is taken off only when `style.wordWrap` is set.
+    const wrapTrim = (style as unknown as { wordWrap?: unknown }).wordWrap ? measure(' ') : 0;
+    const lineWidths = lines.map((l) => Math.ceil(stroke + measure(l) - wrapTrim));
+    const maxLine = Math.max(0, ...lineWidths);
+    const textWidth = style.fixedWidth
+      ? Math.max(style.fixedWidth - pad.left - pad.right, maxLine)
+      : maxLine;
+    const lineHeight = style.getTextMetrics().fontSize + stroke + text.lineSpacing;
+    const W = text.width;
+    const H = text.height;
+    const { originX, originY } = text;
+
+    // A copy of the styled text to crop from. (Cropping the Text's own
+    // texture doesn't work: its source keeps reporting 1×1, so crop UVs
+    // come out as the whole texture.)
+    const key = `text-units-${overlay.asset.id}`;
+    const tex = this.styleCanvas(key, W, H);
+    tex.context.drawImage(text.canvas, 0, 0, W, H);
+    tex.refresh();
+
+    const container = this.add.container(0, 0).setDepth(text.depth);
+    const units: TextUnits['units'] = [];
+    let n = 0;
+    lines.forEach((line, li) => {
+      const align = style.align === 'right' ? 1 : style.align === 'center' ? 0.5 : 0;
+      const x0 = pad.left + stroke / 2 + (textWidth - lineWidths[li]) * align;
+      const top = li === 0 ? 0 : pad.top + stroke / 2 + li * lineHeight;
+      const bottom = li === lines.length - 1 ? H : pad.top + stroke / 2 + (li + 1) * lineHeight;
+      // Unit starts on this line (x in texture px).
+      const starts: number[] = [];
+      // By code point, as the engine counts units (an emoji is one character).
+      let k = 0;
+      let prev = ' ';
+      for (const ch of Array.from(line)) {
+        const isStart = !/\s/.test(ch) && (kind === 'chars' || /\s/.test(prev));
+        if (isStart) starts.push(x0 + measure(line.slice(0, k)));
+        k += ch.length;
+        prev = ch;
+      }
+      starts.forEach((sx, j) => {
+        const left = j === 0 ? 0 : sx;
+        const right = j === starts.length - 1 ? W : starts[j + 1];
+        const img = this.add.image(0, 0, key);
+        img.setCrop(left, top, right - left, bottom - top);
+        // Origin at the unit's centre so it scales in place; positioned in
+        // the text's local space (the container carries its transform).
+        const cx = (left + right) / 2;
+        const cy = (top + bottom) / 2;
+        img.setOrigin(cx / W, cy / H);
+        const y = cy - originY * H;
+        img.setPosition(cx - originX * W, y);
+        container.add(img);
+        units.push({ img, i: n++, y });
+      });
+    });
+    container.setVisible(false);
+    if (this.cropMask) container.setMask(this.cropMask);
+    overlay.textUnits = { container, units, n, fontPx, style: st };
+  }
+
+  // Pose a text's units for this frame, standing in for the text itself.
+  private animateTextUnits(overlay: Overlay, since: number): void {
+    const tu = overlay.textUnits;
+    if (!tu) return;
+    const text = overlay.root as Phaser.GameObjects.Text;
+    if (textAnimatorDone(tu.style, tu.n, since)) {
+      tu.container.setVisible(false);
+      return;
+    }
+    tu.container
+      .setVisible(true)
+      .setPosition(text.x, text.y)
+      .setAngle(text.angle)
+      .setScale(text.scaleX * (text.flipX ? -1 : 1), text.scaleY * (text.flipY ? -1 : 1))
+      .setAlpha(text.alpha);
+    text.setAlpha(0);
+    for (const u of tu.units) {
+      const s = sampleTextUnit(tu.style, u.i, tu.n, since);
+      u.img.setAlpha(s.opacity).setScale(s.scale).setY(u.y + s.y * tu.fontPx);
     }
   }
 
@@ -1412,6 +1539,7 @@ export class PlayclipScene extends Phaser.Scene {
       } else if (!within && overlay.wasVisible) {
         overlay.wasVisible = false;
         overlay.root.setVisible(false);
+        overlay.textUnits?.container.setVisible(false);
       }
       if (overlay.wasVisible) this.animateOverlay(overlay, t, end);
 
@@ -1451,6 +1579,7 @@ export class PlayclipScene extends Phaser.Scene {
     root.setAngle(base.angle + s.rotation);
     root.setAlpha(s.opacity);
     this.applyGlow(overlay, s.glow);
+    this.animateTextUnits(overlay, since);
   }
 
   private applyGlow(overlay: Overlay, amount: number): void {
@@ -1621,6 +1750,7 @@ export class PlayclipScene extends Phaser.Scene {
       };
       if (typeof root.setMask === 'function') root.setMask(mask);
     });
+    this.overlays.forEach((o) => o.textUnits?.container.setMask(mask));
     // A filled (cropped) video stays inside its frame, as in the editor.
     if (this.video) {
       if (this.adapted) this.video.setMask(mask);
