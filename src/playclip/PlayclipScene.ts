@@ -6,6 +6,15 @@ import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
 import { layerOf } from './animation/layers';
 import {
+  isPingPong,
+  reverseEndVideoTime,
+  sourceDuration,
+  toSourceTime,
+  toVideoTime,
+  type LoopMode,
+  type ReversedSegment,
+} from './animation/pingpong';
+import {
   DESIGN_SCREEN,
   stageLayout,
   type OrientationFrames,
@@ -237,6 +246,8 @@ interface Control {
   id: string;
   startTime: number;
   endTime: number;
+  /** Loops: 'pingpong' plays forward then backward (baked, see pingPong). */
+  mode?: LoopMode;
 }
 
 // Core overlay asset types rendered on the video timeline. Audio is deferred;
@@ -306,6 +317,10 @@ export class PlayclipScene extends Phaser.Scene {
 
   // Timeline controls (seek-based playback behaviour).
   private loops: Control[] = [];
+  // Ping-pong loops whose reversed copies are baked into the video. Every
+  // time in the data is in the original video's timeline ("source time");
+  // srcTime/seekSrc map to and from the baked video's clock.
+  private pingPong: ReversedSegment[] = [];
   private jumps: Control[] = [];
   private freezes: Control[] = [];
   private currentLoop: Control | null = null;
@@ -381,6 +396,7 @@ export class PlayclipScene extends Phaser.Scene {
     this.endcardAsset = endcards[0];
     this.assets = allAssets.filter((a) => SUPPORTED_TYPES.includes(a.type));
     this.loops = this.rawControls('loops');
+    this.pingPong = this.playclipData.video?.pingPong ?? [];
     this.jumps = this.rawControls('jumps');
     this.freezes = this.rawControls('freezes');
     this.orientation = this.computeOrientation();
@@ -1236,7 +1252,7 @@ export class PlayclipScene extends Phaser.Scene {
         this.currentLoop = null;
       }
       this.currentJump = null;
-      v.setCurrentTime(action.seekTime);
+      this.seekSrc(v, action.seekTime);
       // Re-baseline so the seek isn't read as a frame-by-frame freeze crossing.
       this.lastFreezeTime = action.seekTime;
       v.setPaused(false);
@@ -1263,7 +1279,8 @@ export class PlayclipScene extends Phaser.Scene {
       if (this.currentLoop) {
         const resumeAt = this.currentLoop.endTime + 0.001;
         this.currentLoop = null;
-        v.setCurrentTime(resumeAt);
+        // Past the loop end, so also past a ping-pong loop's reversed copy.
+        this.seekSrc(v, resumeAt);
         // Re-baseline so the loop-breakout seek isn't read as a freeze crossing.
         this.lastFreezeTime = resumeAt;
       }
@@ -1347,9 +1364,19 @@ export class PlayclipScene extends Phaser.Scene {
 
   // --- Per-frame & resize -------------------------------------------------
 
+  /** The video's position in source time (and whether it runs backwards). */
+  private srcTime(v: Phaser.GameObjects.Video) {
+    return toSourceTime(v.getCurrentTime(), this.pingPong);
+  }
+
+  /** Seek to a source time (on the forward pass). */
+  private seekSrc(v: Phaser.GameObjects.Video, t: number): void {
+    v.setCurrentTime(toVideoTime(t, this.pingPong));
+  }
+
   private getPostRollConfig(): PostRollConfig | null {
     if (!this.endcardAsset || !this.video) return null;
-    const duration = this.video.getDuration();
+    const duration = sourceDuration(this.video.getDuration(), this.pingPong);
     const videoDuration =
       Number.isFinite(duration) && duration > 0
         ? duration
@@ -1359,7 +1386,7 @@ export class PlayclipScene extends Phaser.Scene {
 
   /** Timeline clock for overlay visibility (includes synthetic post-roll time). */
   private getPlaybackTime(): number {
-    const videoTime = this.video?.getCurrentTime() ?? 0;
+    const videoTime = this.video ? this.srcTime(this.video).time : 0;
     if (!this.videoEnded) return videoTime;
     const postRoll = this.getPostRollConfig();
     const elapsed = (this.time.now - this.postRollClockStart) / 1000;
@@ -1485,11 +1512,33 @@ export class PlayclipScene extends Phaser.Scene {
   // Loops repeat a segment; jumps skip a segment. Loop takes precedence.
   // Mirrors the playclip HTML runtime's checkLoops/checkJumps behaviour.
   private applyLoopsAndJumps(v: Phaser.GameObjects.Video): void {
-    const t = v.getCurrentTime();
+    const now = this.srcTime(v);
+    const t = now.time;
+    const bakedIndex = (l: Control) =>
+      isPingPong(l)
+        ? this.pingPong.findIndex(
+            (s) => s.startTime === l.startTime && s.endTime === l.endTime,
+          )
+        : -1;
+
+    // Never play a reversed copy outside its own active loop (e.g. reaching it
+    // after the loop was broken): skip to just past it.
+    if (now.reversing && !(this.currentLoop && bakedIndex(this.currentLoop) === now.segment)) {
+      this.seekSrc(v, this.pingPong[now.segment].endTime + 0.001);
+      return;
+    }
 
     if (this.currentLoop) {
-      if (t >= this.currentLoop.endTime - 0.02) {
-        v.setCurrentTime(this.currentLoop.startTime + 0.001);
+      const seg = bakedIndex(this.currentLoop);
+      if (seg >= 0) {
+        // Ping-pong: forward runs straight on into the reversed copy; at the
+        // end of that, start the forward pass again.
+        if (v.getCurrentTime() >= reverseEndVideoTime(this.pingPong, seg) - 0.02) {
+          this.seekSrc(v, this.currentLoop.startTime + 0.001);
+          return;
+        }
+      } else if (t >= this.currentLoop.endTime - 0.02) {
+        this.seekSrc(v, this.currentLoop.startTime + 0.001);
         return;
       }
       if (t < this.currentLoop.startTime || t > this.currentLoop.endTime + 0.1) {
@@ -1512,7 +1561,7 @@ export class PlayclipScene extends Phaser.Scene {
       const found = this.jumps.find((j) => t >= j.startTime - 0.26 && t <= j.startTime);
       if (found) {
         this.currentJump = found;
-        v.setCurrentTime(found.endTime + 0.001);
+        this.seekSrc(v, found.endTime + 0.001);
       }
     }
   }
@@ -1524,7 +1573,7 @@ export class PlayclipScene extends Phaser.Scene {
   // and re-arms once the playhead leaves the window.
   private applyFreezes(v: Phaser.GameObjects.Video): void {
     if (this.freezes.length === 0) return;
-    const t = v.getCurrentTime();
+    const t = this.srcTime(v).time;
     const prev = this.lastFreezeTime;
     this.lastFreezeTime = t;
 
@@ -1568,7 +1617,7 @@ export class PlayclipScene extends Phaser.Scene {
       this.currentFreeze = found;
       this.triggeredFreezes.add(found.id);
       if (Math.abs(t - found.startTime) > 0.001) {
-        v.setCurrentTime(found.startTime);
+        this.seekSrc(v, found.startTime);
         this.lastFreezeTime = found.startTime;
       }
       v.setPaused(true);
