@@ -6,6 +6,7 @@
 import type { GlowStyle, GradientStyle, ShadowStyle, StrokeStyle } from './animation/styles';
 
 import type { OrientationFrames } from './animation/frame';
+import type { ReversedSegment } from './animation/pingpong';
 
 export type Orientation = 'portrait' | 'landscape';
 
@@ -109,6 +110,8 @@ export interface PlayclipVideo {
   videoSrc: string | null;
   portraitSrc: string | null;
   landscapeSrc: string | null;
+  /** Ping-pong loops baked into the video (see animation/pingpong.ts). */
+  pingPong?: ReversedSegment[];
 }
 
 // Each asset arrives wrapped with its editable schema; the scene only needs
