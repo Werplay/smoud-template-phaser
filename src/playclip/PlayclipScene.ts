@@ -1389,7 +1389,7 @@ export class PlayclipScene extends Phaser.Scene {
   private onPointerMove(pointer: Phaser.Input.Pointer): void {
     const press = this.press;
     if (!press) return;
-    press.p.move(pointer.worldX, pointer.worldY);
+    press.p.move(pointer.worldX, pointer.worldY, this.time.now);
     if (dropZoneOf(press.overlay.asset) && !press.p.still)
       press.overlay.drag = { x: press.p.dx, y: press.p.dy };
   }

@@ -9,8 +9,13 @@ export type Direction = 'left' | 'right' | 'up' | 'down';
 export const TAP_SLOP = 10;
 /** A swipe covers at least this distance… */
 export const SWIPE_MIN_DISTANCE = 40;
-/** …at no less than this average speed (px/ms). */
-export const SWIPE_MIN_SPEED = 0.25;
+/**
+ * …and at some point moves at least this fast (px/ms), measured over
+ * SPEED_WINDOW. Peak speed, not the average over the press, so pausing before
+ * or after the swipe doesn't turn it into a drag.
+ */
+export const SWIPE_MIN_SPEED = 0.1;
+export const SPEED_WINDOW = 100;
 /** Taps further apart than this start a new tap count. */
 export const TAP_COUNT_GAP = 400;
 
@@ -37,12 +42,30 @@ export class Press {
     readonly x0: number,
     readonly y0: number,
     readonly t0: number,
-  ) {}
+  ) {
+    this.samples = [{ x: x0, y: y0, t: t0 }];
+  }
 
-  move(x: number, y: number): void {
+  /** Fastest the pointer moved over any SPEED_WINDOW (px/ms). */
+  peakSpeed = 0;
+  private samples: { x: number; y: number; t: number }[];
+
+  move(x: number, y: number, t: number): void {
     this.dx = x - this.x0;
     this.dy = y - this.y0;
     this.moved = Math.max(this.moved, Math.hypot(this.dx, this.dy));
+    // Speed from the oldest sample still inside the window (or the newest
+    // before it, when moves are sparse).
+    const s = this.samples;
+    while (s.length > 1 && t - s[1].t >= SPEED_WINDOW) s.shift();
+    const from = s[0];
+    const dt = t - from.t;
+    if (dt > 0)
+      this.peakSpeed = Math.max(
+        this.peakSpeed,
+        Math.hypot(x - from.x, y - from.y) / dt,
+      );
+    s.push({ x, y, t });
   }
 
   /** Still close enough to where it went down to count as a tap or hold. */
@@ -56,11 +79,10 @@ export class Press {
     y: number,
     t: number,
   ): { kind: 'tap' } | { kind: 'swipe'; dir: Direction } | null {
-    this.move(x, y);
+    this.move(x, y, t);
     if (this.still) return this.held ? null : { kind: 'tap' };
     const d = Math.hypot(this.dx, this.dy);
-    const speed = d / Math.max(1, t - this.t0);
-    if (d >= SWIPE_MIN_DISTANCE && speed >= SWIPE_MIN_SPEED)
+    if (d >= SWIPE_MIN_DISTANCE && this.peakSpeed >= SWIPE_MIN_SPEED)
       return { kind: 'swipe', dir: directionOf(this.dx, this.dy) };
     return null;
   }
