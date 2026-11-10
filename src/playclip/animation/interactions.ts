@@ -4,8 +4,9 @@
 //
 // Buttons are the first to move onto it: an asset's old `buttonAction` (play /
 // seek / CTA) is a tap interaction with one action. Gestures (tap count, hold,
-// swipe, drag onto a drop zone) are recognised by gestures.ts. Idle,
-// variables, clips and effects add trigger and action kinds as they land;
+// swipe, drag onto a drop zone) are recognised by gestures.ts. An idle
+// trigger turns the asset into a hint (gestures.ts IdleHints). Variables,
+// clips and effects add trigger and action kinds as they land;
 // Loop, Jump and Freeze keep their own engine for now.
 
 import type { Direction } from './gestures';
@@ -18,7 +19,12 @@ export type Trigger =
   | { kind: 'hold'; ms: number }
   | { kind: 'swipe'; dir: Direction | 'any' }
   /** The asset is dragged and dropped onto the asset `dropZoneId`. */
-  | { kind: 'drag'; dropZoneId: string };
+  | { kind: 'drag'; dropZoneId: string }
+  /**
+   * No touch anywhere for `ms` while the asset is in its window: the asset
+   * (hidden until then) shows and its actions run. It may have no actions.
+   */
+  | { kind: 'idle'; ms: number };
 
 export type TriggerKind = Trigger['kind'];
 
@@ -27,7 +33,8 @@ export type GestureEvent =
   | { kind: 'tap'; count: number }
   | { kind: 'hold'; ms: number }
   | { kind: 'swipe'; dir: Direction }
-  | { kind: 'drop'; zoneId: string };
+  | { kind: 'drop'; zoneId: string }
+  | { kind: 'idle' };
 
 export type Action =
   /** Resume playback, breaking out of a freeze, loop or jump. */
@@ -121,16 +128,22 @@ export function triggerMatches(t: Trigger, e: GestureEvent): boolean {
       return e.kind === 'swipe' && (t.dir === 'any' || t.dir === e.dir);
     case 'drag':
       return e.kind === 'drop' && e.zoneId === t.dropZoneId;
+    case 'idle':
+      return e.kind === 'idle';
     default:
       return false;
   }
 }
 
-/** Everything the gesture makes the asset do, in order. */
+/**
+ * Everything the gesture makes the asset do, in order. Idle never opens the
+ * store: ad networks reject a store redirect the viewer didn't tap for.
+ */
 export const actionsFor = (x: Interactive, e: GestureEvent): Action[] =>
   interactionsOf(x)
     .filter((i) => triggerMatches(i.trigger, e))
-    .reduce<Action[]>((all, i) => all.concat(i.actions), []);
+    .reduce<Action[]>((all, i) => all.concat(i.actions), [])
+    .filter((a) => e.kind !== 'idle' || a.kind !== 'cta');
 
 /** Every action the asset has, whatever triggers it. */
 const allActions = (x: Interactive): Action[] =>
@@ -161,6 +174,13 @@ export const holdTimes = (x: Interactive): number[] =>
       ),
     ),
   );
+
+/** How long (ms) without a touch before the asset shows, if it is an idle hint. */
+export const idleMsOf = (x: Interactive): number | null => {
+  for (const i of interactionsOf(x))
+    if (i.trigger.kind === 'idle') return i.trigger.ms;
+  return null;
+};
 
 /** The drop zone a drag trigger targets (the asset is then draggable). */
 export const dropZoneOf = (x: Interactive): string | null => {
@@ -200,7 +220,8 @@ export function withPrimaryAction<T extends Interactive>(
     actions,
   };
   if (first) {
-    if (actions.length) next[0] = updated;
+    // An idle hint needs no action (it just shows), so it stays.
+    if (actions.length || first.trigger.kind === 'idle') next[0] = updated;
     else next.splice(0, 1);
   } else if (actions.length) next.push(updated);
   const out = { ...x, interactions: next } as T;
@@ -209,17 +230,24 @@ export function withPrimaryAction<T extends Interactive>(
 }
 
 /**
- * `x` with its first interaction's trigger set. With no interaction yet, one
- * is added that plays the video (buttons always do something).
+ * `x` with its first interaction's trigger set. A gesture with no action yet
+ * gets one that plays the video (buttons always do something); an idle hint
+ * starts with none.
  */
 export function withPrimaryTrigger<T extends Interactive>(
   x: T,
   trigger: Trigger,
 ): T {
   const all = interactionsOf(x);
-  const next = all.length
-    ? [{ ...all[0], trigger }, ...all.slice(1)]
-    : [{ id: TAP_ID, trigger, actions: [{ kind: 'play' } as Action] }];
+  const actions = all[0]?.actions.length
+    ? all[0].actions
+    : trigger.kind === 'idle'
+      ? []
+      : [{ kind: 'play' } as Action];
+  const next = [
+    { id: all[0]?.id ?? TAP_ID, trigger, actions },
+    ...all.slice(1),
+  ];
   const out = { ...x, interactions: next } as T;
   delete (out as Interactive).buttonAction;
   return out;
@@ -249,8 +277,9 @@ export function ctaLinksOf(
     : null;
 }
 
-/** True when some gesture on the asset does something. */
-export const hasActions = (x: Interactive) => allActions(x).length > 0;
+/** True when some gesture on the asset does something (idle isn't a gesture). */
+export const hasActions = (x: Interactive) =>
+  interactionsOf(x).some((i) => i.trigger.kind !== 'idle' && i.actions.length);
 
 /** `x` with its CTA actions' store links set (a CTA tap is added if it has none). */
 export function withCtaLinks<T extends Interactive>(
