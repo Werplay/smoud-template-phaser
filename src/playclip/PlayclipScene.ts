@@ -20,6 +20,7 @@ import {
 } from './animation/interactions';
 import { IdleHints, Press, TapCounter } from './animation/gestures';
 import { fillOf, PROGRESS_DEFAULTS, Vars } from './animation/vars';
+import { clipIdOf, inClip, nextClipAfter } from './animation/clips';
 import {
   isPingPong,
   reverseEndVideoTime,
@@ -68,6 +69,7 @@ import type {
   Orientation,
   OrientationValue,
   PlayclipAsset,
+  PlayclipClip,
   PlayclipData,
   Vec2,
 } from './types';
@@ -296,10 +298,15 @@ interface Control {
   endTime: number;
   /** Loops: 'pingpong' plays forward then backward (baked, see pingPong). */
   mode?: LoopMode;
+  /** The clip it belongs to (animation/clips.ts); absent = the first. */
+  clipId?: string;
 }
 
 // Core overlay asset types rendered on the video timeline. Audio is deferred;
 // endcard is handled separately (full-screen post-roll).
+/** Loader key of an added clip's video. */
+const clipKey = (id: string) => `clip_c_${id}`;
+
 const SUPPORTED_TYPES: PlayclipAsset['type'][] = [
   'text',
   'image',
@@ -394,6 +401,16 @@ export class PlayclipScene extends Phaser.Scene {
   // breaking out of a freeze doesn't immediately re-trap it.
   private triggeredFreezes = new Set<string>();
 
+  // Multi-clip playables (animation/clips.ts): every clip, the one playing,
+  // and every clip's controls (this.loops/jumps/freezes are the playing one's).
+  private clips: PlayclipClip[] = [];
+  private activeClip = '';
+  private allControls: Record<'loops' | 'jumps' | 'freezes', Control[]> = {
+    loops: [],
+    jumps: [],
+    freezes: [],
+  };
+
   constructor() {
     super({ key: 'PlayclipScene' });
   }
@@ -445,6 +462,10 @@ export class PlayclipScene extends Phaser.Scene {
       this.videoKeys.landscape = 'clip_landscape';
       this.load.video('clip_landscape', v.landscapeSrc, true);
     }
+    // Added clips: one file each, for every orientation.
+    (this.playclipData.clips ?? []).slice(1).forEach((c) => {
+      if (c.src) this.load.video(clipKey(c.id), c.src, true);
+    });
   }
 
   create(): void {
@@ -455,10 +476,13 @@ export class PlayclipScene extends Phaser.Scene {
     }
     this.endcardAsset = endcards[0];
     this.assets = allAssets.filter((a) => SUPPORTED_TYPES.includes(a.type));
-    this.loops = this.rawControls('loops');
-    this.pingPong = this.playclipData.video?.pingPong ?? [];
-    this.jumps = this.rawControls('jumps');
-    this.freezes = this.rawControls('freezes');
+    this.clips = (this.playclipData.clips?.length ?? 0) > 1 ? this.playclipData.clips! : [];
+    this.allControls = {
+      loops: this.rawControls('loops'),
+      jumps: this.rawControls('jumps'),
+      freezes: this.rawControls('freezes'),
+    };
+    this.useClip(this.clips[0]?.id ?? '');
     this.orientation = this.computeOrientation();
 
     // Initialise audio assets — active ones with a URL, separate from visual overlays.
@@ -505,6 +529,8 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   private currentVideoKey(): string | undefined {
+    const clip = this.clips.find((c) => c.id === this.activeClip);
+    if (clip && clip !== this.clips[0]) return clipKey(clip.id);
     const k = this.videoKeys;
     if (this.orientation === 'portrait' && k.portrait) return k.portrait;
     if (this.orientation === 'landscape' && k.landscape) return k.landscape;
@@ -547,6 +573,9 @@ export class PlayclipScene extends Phaser.Scene {
     // frame in update()) can't trigger a premature completion.
     video.on(Phaser.GameObjects.Events.VIDEO_COMPLETE, () => {
       if (!this.started) return;
+      // A clip that carries on into another switches instead of ending.
+      const next = nextClipAfter(this.activeClip, this.clips);
+      if (next) return this.switchClip(next, 0);
       this.videoEnded = true;
       video.setPaused(true);
       const duration = video.getDuration();
@@ -573,6 +602,50 @@ export class PlayclipScene extends Phaser.Scene {
     // poster. Playback proper begins on the first tap (see startPlayback).
     video.setMute(true);
     video.play(false);
+  }
+
+  /** Make `id` the playing clip's controls and ping-pong map (no video change). */
+  private useClip(id: string): void {
+    this.activeClip = id;
+    const clip = this.clips.find((c) => c.id === id);
+    const mine = (list: Control[]) => inClip(list, id, this.clips);
+    this.loops = mine(this.allControls.loops);
+    this.jumps = mine(this.allControls.jumps);
+    this.freezes = mine(this.allControls.freezes);
+    this.pingPong =
+      clip && clip !== this.clips[0]
+        ? (clip.pingPong ?? [])
+        : (this.playclipData.video?.pingPong ?? []);
+  }
+
+  /** True for assets of the playing clip. */
+  private inActiveClip(asset: { clipId?: string }): boolean {
+    return !this.clips.length || clipIdOf(asset, this.clips) === this.activeClip;
+  }
+
+  /** Play clip `id` from `t` (a goTo action, or a clip carrying on). */
+  private switchClip(id: string, t: number): void {
+    const v = this.video;
+    if (!v || !this.clips.some((c) => c.id === id)) return;
+    const changed = id !== this.activeClip;
+    this.useClip(id);
+    this.currentLoop = null;
+    this.currentJump = null;
+    this.currentFreeze = null;
+    this.triggeredFreezes.clear();
+    this.lastFreezeTime = t;
+    this.videoEnded = false;
+    this.overlays.forEach((o) => (o.clicked = false));
+    if (changed) {
+      const key = this.currentVideoKey();
+      if (key && this.cache.video.exists(key)) {
+        this.lastVideoKey = key;
+        v.changeSource(key, true);
+        v.setMute(false);
+      }
+    }
+    this.seekSrc(v, t);
+    v.setPaused(false);
   }
 
   private maybeSwapVideoSource(): void {
@@ -1552,9 +1625,7 @@ export class PlayclipScene extends Phaser.Scene {
     }
 
     runActions(actions, {
-      // The export plays the first clip only until it learns clips (phase
-      // 1e, part 3); multi-clip exports are blocked until then.
-      goTo: () => {},
+      goTo: (clipId, t) => this.switchClip(clipId, t),
       // A counter change fires what it reaches on overlays on screen
       // (depth-capped, in case counters set each other in a loop).
       setVar: (a) => {
@@ -1620,7 +1691,8 @@ export class PlayclipScene extends Phaser.Scene {
 
     // Find the first audio asset whose time window covers the current playhead.
     const activeAsset = this.audioAssets.find(
-      (a) => t >= a.time && t <= (a.endTime || a.time + 5),
+      (a) =>
+        this.inActiveClip(a) && t >= a.time && t <= (a.endTime || a.time + 5),
     ) ?? null;
 
     if (activeAsset) {
@@ -1748,7 +1820,7 @@ export class PlayclipScene extends Phaser.Scene {
     for (const overlay of this.overlays) {
       const start = overlay.asset.time;
       const end = overlay.asset.endTime || overlay.asset.time + 5;
-      const inWindow = t >= start && t <= end;
+      const inWindow = t >= start && t <= end && this.inActiveClip(overlay.asset);
 
       // Entry, loop and exit all happen inside the asset's window (the exit
       // plays in its last animationDuration), so visibility is just the window

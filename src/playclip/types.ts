@@ -8,6 +8,7 @@ import type { GlowStyle, GradientStyle, ShadowStyle, StrokeStyle } from './anima
 import type { OrientationFrames } from './animation/frame';
 import type { ReversedSegment } from './animation/pingpong';
 import type { Interaction } from './animation/interactions';
+import type { ClipLike } from './animation/clips';
 
 export type Orientation = 'portrait' | 'landscape';
 
@@ -112,6 +113,16 @@ export interface PlayclipAsset {
   zIndex?: number;
   /** A progress bar's counter and full value (see animation/vars.ts). */
   progress?: { variable: string; max: number };
+  /** The clip it belongs to (animation/clips.ts); absent = the first. */
+  clipId?: string;
+}
+
+/** One clip of a multi-clip playable; the first clip's video is `video`. */
+export interface PlayclipClip extends ClipLike {
+  name?: string;
+  /** An added clip's video (data URI); null for the first clip. */
+  src: string | null;
+  pingPong?: ReversedSegment[];
 }
 
 export interface PlayclipVideo {
@@ -141,4 +152,6 @@ export interface PlayclipData {
   video: PlayclipVideo;
   assets: Array<AssetEntry | PlayclipAsset>;
   controls?: unknown;
+  /** Multi-clip playables (animation/clips.ts); absent = a single video. */
+  clips?: PlayclipClip[];
 }
