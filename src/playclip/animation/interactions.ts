@@ -70,7 +70,19 @@ export interface Interaction {
   id: string;
   trigger: Trigger;
   actions: Action[];
+  /**
+   * Seconds on the asset's clip timeline when it may fire (either end open).
+   * Absent = whenever the asset is on screen.
+   */
+  activeFrom?: number;
+  activeTo?: number;
 }
+
+/** True when the interaction may fire at `t` (no time = always). */
+export const activeAt = (i: Interaction, t?: number): boolean =>
+  t === undefined ||
+  ((i.activeFrom === undefined || t >= i.activeFrom - 0.001) &&
+    (i.activeTo === undefined || t <= i.activeTo + 0.001));
 
 /** The pre-interactions button action (still read from old saves). */
 export interface LegacyButtonAction {
@@ -165,9 +177,14 @@ export function triggerMatches(t: Trigger, e: GestureEvent): boolean {
  * Everything the gesture makes the asset do, in order. Idle never opens the
  * store: ad networks reject a store redirect the viewer didn't tap for.
  */
-export const actionsFor = (x: Interactive, e: GestureEvent): Action[] =>
+export const actionsFor = (
+  x: Interactive,
+  e: GestureEvent,
+  /** The playhead (s); interactions outside their time window are skipped. */
+  t?: number,
+): Action[] =>
   interactionsOf(x)
-    .filter((i) => triggerMatches(i.trigger, e))
+    .filter((i) => triggerMatches(i.trigger, e) && activeAt(i, t))
     .reduce<Action[]>((all, i) => all.concat(i.actions), [])
     .filter((a) => e.kind !== 'idle' || a.kind !== 'cta');
 

@@ -1596,7 +1596,7 @@ export class PlayclipScene extends Phaser.Scene {
   ): boolean {
     // A button with no interactions at all behaves as 'play' (as before).
     const actions: Action[] = interactionsOf(overlay.asset).length
-      ? actionsFor(overlay.asset, gesture)
+      ? actionsFor(overlay.asset, gesture, this.getPlaybackTime())
       : gesture.kind === 'tap'
         ? [{ kind: 'play' }]
         : [];
