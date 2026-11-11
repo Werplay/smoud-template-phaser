@@ -12,12 +12,14 @@ import {
   holdTimes,
   idleMsOf,
   interactionsOf,
+  movesPlayback,
   needsPress,
   runActions,
   type Action,
   type GestureEvent,
 } from './animation/interactions';
 import { IdleHints, Press, TapCounter } from './animation/gestures';
+import { fillOf, PROGRESS_DEFAULTS, Vars } from './animation/vars';
 import {
   isPingPong,
   reverseEndVideoTime,
@@ -204,6 +206,16 @@ function cssColorToInt(color: string | undefined): number | undefined {
   }
 }
 
+/** A CSS colour as Phaser's int plus its alpha (rgba() keeps its opacity). */
+function colorAndAlpha(css: string): { color: number; alpha: number } {
+  try {
+    const c = Phaser.Display.Color.ValueToColor(css);
+    return { color: c.color, alpha: c.alphaGL };
+  } catch {
+    return { color: 0xffffff, alpha: 1 };
+  }
+}
+
 function textBackgroundColor(color: string | undefined): string | undefined {
   if (!color || color === 'transparent') return undefined;
   return color;
@@ -261,6 +273,8 @@ interface Overlay {
   // Where a drag trigger moved it (screen px); kept after a drop until the
   // overlay leaves its window.
   drag?: Vec2;
+  // A progress bar: redraws its fill (0–1) each frame (see update()).
+  drawFill?: (fill: number) => void;
 }
 
 interface TextUnits {
@@ -291,6 +305,7 @@ const SUPPORTED_TYPES: PlayclipAsset['type'][] = [
   'image',
   'button',
   'transparent-button',
+  'progress',
 ];
 
 // Draw order mirrors the editor: the video at the bottom, then every overlay at
@@ -317,6 +332,8 @@ export class PlayclipScene extends Phaser.Scene {
   private tapCounter = new TapCounter();
   // Idle hints: overlays with an idle trigger show once nothing is touched.
   private idleHints = new IdleHints(0);
+  // Counters for this run of the ad (animation/vars.ts).
+  private vars = new Vars();
   private endcardAsset?: PlayclipAsset;
   private endcardOverlay?: Overlay;
   private videoEnded = false;
@@ -636,6 +653,7 @@ export class PlayclipScene extends Phaser.Scene {
       else if (asset.type === 'button') overlay = this.buildButton(asset);
       else if (asset.type === 'transparent-button')
         overlay = this.buildTransparentButton(asset);
+      else if (asset.type === 'progress') overlay = this.buildProgress(asset);
       if (overlay) {
         overlay.root.setVisible(false);
         this.overlays.push(overlay);
@@ -1207,6 +1225,58 @@ export class PlayclipScene extends Phaser.Scene {
     };
   }
 
+  // A progress bar: a track with a fill drawn from its counter every frame
+  // (update() → drawFill; animation/vars.ts). Taps pass through it.
+  private buildProgress(asset: PlayclipAsset): Overlay {
+    const container = this.add.container(0, 0).setDepth(layerOf(asset));
+    const g = this.add.graphics();
+    container.add(g);
+    let w = 0;
+    let h = 0;
+    let st: AssetStyle = {};
+    let drawn = -1;
+    const draw = (fill: number) => {
+      if (fill === drawn) return;
+      drawn = fill;
+      const r = Math.min(firstNumber(st.borderRadius, 999), h / 2);
+      const track = colorAndAlpha(st.backgroundColor || PROGRESS_DEFAULTS.track);
+      const bar = colorAndAlpha(st.color || PROGRESS_DEFAULTS.fill);
+      g.clear();
+      g.fillStyle(track.color, track.alpha);
+      g.fillRoundedRect(-w / 2, -h / 2, w, h, r);
+      const fw = w * fill;
+      if (fw > 0) {
+        g.fillStyle(bar.color, bar.alpha);
+        g.fillRoundedRect(-w / 2, -h / 2, fw, h, Math.min(r, fw / 2));
+      }
+    };
+    return {
+      asset,
+      root: container,
+      clicked: false,
+      wasVisible: false,
+      appearedAt: 0,
+      designScale: 1,
+      drawFill: draw,
+      layout: (rect, orientation) => {
+        st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
+        const design = this.designVideoBounds(asset, orientation, st, rect);
+        const k = design.width > 0 ? rect.width / design.width : 1;
+        const wPct = this.widthPct(asset, orientation);
+        const hPct = this.heightPct(asset, orientation);
+        w = wPct ? wPct * rect.width : firstNumber(st.width, 200) * k;
+        h = hPct ? hPct * rect.height : firstNumber(st.height, 20) * k;
+        const c = this.centerOf(asset, rect, orientation);
+        container.setPosition(c.x, c.y);
+        container.setSize(w, h);
+        container.setAngle(st.rotation || 0);
+        const f = drawn < 0 ? 0 : drawn;
+        drawn = -1;
+        draw(f);
+      },
+    };
+  }
+
   // Full-screen post-roll overlay shown when the clip ends (or within its time
   // window). Background color lives in `content`; optional image in `imageUrl`.
   // Color is always drawn first so transparent PNG regions match the editor.
@@ -1446,7 +1516,11 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   // Run what `gesture` does on the overlay; true if anything ran.
-  private activateButton(overlay: Overlay, gesture: GestureEvent): boolean {
+  private activateButton(
+    overlay: Overlay,
+    gesture: GestureEvent,
+    depth = 0,
+  ): boolean {
     // A button with no interactions at all behaves as 'play' (as before).
     const actions: Action[] = interactionsOf(overlay.asset).length
       ? actionsFor(overlay.asset, gesture)
@@ -1458,10 +1532,12 @@ export class PlayclipScene extends Phaser.Scene {
     // Debounce a single appearance of the button; this is re-armed in update()
     // once the button leaves its time window (so it can be pressed again if its
     // range comes back around). It does NOT drive visibility — see update().
-    overlay.clicked = true;
+    // A counter tap leaves it armed so it can be tapped again and again.
+    const moves = movesPlayback(actions);
+    if (moves) overlay.clicked = true;
 
     const v = this.video;
-    if (gesture.kind !== 'idle')
+    if (gesture.kind !== 'idle' && gesture.kind !== 'var')
       track(actions.some((a) => a.kind === 'cta') ? 'ctaCall' : 'click', {
         element_id: overlay.asset.id,
         element_content: overlay.asset.content,
@@ -1470,12 +1546,20 @@ export class PlayclipScene extends Phaser.Scene {
     // Pressing any button breaks out of an active freeze and resumes playback.
     // The freeze stays in triggeredFreezes so it won't immediately re-trap as the
     // playhead plays back out through its window.
-    if (this.currentFreeze && v) {
+    if (moves && this.currentFreeze && v) {
       this.currentFreeze = null;
       v.setPaused(false);
     }
 
     runActions(actions, {
+      // A counter change fires what it reaches on overlays on screen
+      // (depth-capped, in case counters set each other in a loop).
+      setVar: (a) => {
+        const c = this.vars.apply(a);
+        if (!c || depth >= 8) return;
+        for (const o of this.overlays)
+          if (o.wasVisible) this.activateButton(o, { kind: 'var', ...c }, depth + 1);
+      },
       seek: (t) => {
         if (!v) return;
         // Seeking outside an active loop/jump breaks out of it (mirrors the
@@ -1688,6 +1772,10 @@ export class PlayclipScene extends Phaser.Scene {
         overlay.textUnits?.container.setVisible(false);
       }
       if (overlay.wasVisible) this.animateOverlay(overlay, t, end);
+      if (overlay.wasVisible && overlay.drawFill && overlay.asset.progress) {
+        const p = overlay.asset.progress;
+        overlay.drawFill(fillOf(this.vars.get(p.variable), p.max));
+      }
       if (idle?.fire) this.activateButton(overlay, { kind: 'idle' });
 
       // Re-arm an interactive overlay once it leaves its window so it can be
