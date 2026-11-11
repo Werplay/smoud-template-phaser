@@ -10,13 +10,14 @@ import {
   dropZoneOf,
   hasActions,
   holdTimes,
+  idleMsOf,
   interactionsOf,
   needsPress,
   runActions,
   type Action,
   type GestureEvent,
 } from './animation/interactions';
-import { Press, TapCounter } from './animation/gestures';
+import { IdleHints, Press, TapCounter } from './animation/gestures';
 import {
   isPingPong,
   reverseEndVideoTime,
@@ -314,6 +315,8 @@ export class PlayclipScene extends Phaser.Scene {
     timers: Phaser.Time.TimerEvent[];
   } | null = null;
   private tapCounter = new TapCounter();
+  // Idle hints: overlays with an idle trigger show once nothing is touched.
+  private idleHints = new IdleHints(0);
   private endcardAsset?: PlayclipAsset;
   private endcardOverlay?: Overlay;
   private videoEnded = false;
@@ -1302,6 +1305,7 @@ export class PlayclipScene extends Phaser.Scene {
   // Single entry point for all taps. The very first tap anywhere only starts
   // the ad; later taps are routed to whatever interactive overlay was hit.
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
+    this.idleHints.input(this.time.now);
     if (!this.started) {
       this.startPlayback();
       return;
@@ -1457,10 +1461,11 @@ export class PlayclipScene extends Phaser.Scene {
     overlay.clicked = true;
 
     const v = this.video;
-    track(actions.some((a) => a.kind === 'cta') ? 'ctaCall' : 'click', {
-      element_id: overlay.asset.id,
-      element_content: overlay.asset.content,
-    });
+    if (gesture.kind !== 'idle')
+      track(actions.some((a) => a.kind === 'cta') ? 'ctaCall' : 'click', {
+        element_id: overlay.asset.id,
+        element_content: overlay.asset.content,
+      });
 
     // Pressing any button breaks out of an active freeze and resumes playback.
     // The freeze stays in triggeredFreezes so it won't immediately re-trap as the
@@ -1656,10 +1661,22 @@ export class PlayclipScene extends Phaser.Scene {
     for (const overlay of this.overlays) {
       const start = overlay.asset.time;
       const end = overlay.asset.endTime || overlay.asset.time + 5;
-      const within = t >= start && t <= end;
+      const inWindow = t >= start && t <= end;
 
       // Entry, loop and exit all happen inside the asset's window (the exit
-      // plays in its last animationDuration), so visibility is just the window.
+      // plays in its last animationDuration), so visibility is just the window
+      // (an idle hint also waits until nothing has been touched for a while).
+      const idleMs = idleMsOf(overlay.asset);
+      const idle =
+        idleMs === null
+          ? null
+          : this.idleHints.step(
+              overlay.asset.id,
+              inWindow && this.started,
+              idleMs,
+              this.time.now,
+            );
+      const within = idle ? idle.visible : inWindow;
       if (within && !overlay.wasVisible) {
         overlay.wasVisible = true;
         overlay.appearedAt = this.time.now;
@@ -1671,6 +1688,7 @@ export class PlayclipScene extends Phaser.Scene {
         overlay.textUnits?.container.setVisible(false);
       }
       if (overlay.wasVisible) this.animateOverlay(overlay, t, end);
+      if (idle?.fire) this.activateButton(overlay, { kind: 'idle' });
 
       // Re-arm an interactive overlay once it leaves its window so it can be
       // pressed again if its time range comes back around (e.g. a looping intro).

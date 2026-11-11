@@ -105,3 +105,44 @@ export class TapCounter {
     else this.last.clear();
   }
 }
+
+/**
+ * Idle hints: an asset with an idle trigger stays hidden until the viewer has
+ * not touched the screen for its `ms` while it is in its time window. It then
+ * shows (and its actions run once) until the next touch hides it again.
+ */
+export class IdleHints {
+  private lastInput: number;
+  private entered = new Map<string, number>();
+  private fired = new Set<string>();
+
+  constructor(t0: number) {
+    this.lastInput = t0;
+  }
+
+  /** The viewer touched the screen. */
+  input(t: number): void {
+    this.lastInput = t;
+    this.fired.clear();
+  }
+
+  /** Step one idle asset; `fire` is true on the frame it appears. */
+  step(
+    id: string,
+    inWindow: boolean,
+    ms: number,
+    t: number,
+  ): { visible: boolean; fire: boolean } {
+    if (!inWindow) {
+      this.entered.delete(id);
+      this.fired.delete(id);
+      return { visible: false, fire: false };
+    }
+    let since = this.entered.get(id);
+    if (since === undefined) this.entered.set(id, (since = t));
+    const visible = t - Math.max(this.lastInput, since) >= ms;
+    const fire = visible && !this.fired.has(id);
+    if (fire) this.fired.add(id);
+    return { visible, fire };
+  }
+}
