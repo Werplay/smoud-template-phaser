@@ -85,7 +85,9 @@ export type AssetType =
   | 'image'
   | 'audio'
   | 'transparent-button'
-  | 'endcard';
+  | 'endcard'
+  /** A bar that fills as a counter goes up (`progress`). */
+  | 'progress';
 
 export interface PlayclipAsset {
   id: string;
@@ -108,6 +110,8 @@ export interface PlayclipAsset {
   portraitHeightPercentage?: number;
   /** Stacking layer (see animation/layers.ts). */
   zIndex?: number;
+  /** A progress bar's counter and full value (see animation/vars.ts). */
+  progress?: { variable: string; max: number };
 }
 
 export interface PlayclipVideo {

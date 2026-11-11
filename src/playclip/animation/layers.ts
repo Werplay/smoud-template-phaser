@@ -9,6 +9,7 @@ export const DEFAULT_LAYER: Record<string, number> = {
   endcard: 5,
   text: 10,
   image: 20,
+  progress: 25,
   button: 30,
   'transparent-button': 40,
 };

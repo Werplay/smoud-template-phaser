@@ -10,6 +10,7 @@
 // Loop, Jump and Freeze keep their own engine for now.
 
 import type { Direction } from './gestures';
+import type { VarChange } from './vars';
 
 export type Trigger =
   | { kind: 'tap' }
@@ -24,7 +25,12 @@ export type Trigger =
    * No touch anywhere for `ms` while the asset is in its window: the asset
    * (hidden until then) shows and its actions run. It may have no actions.
    */
-  | { kind: 'idle'; ms: number };
+  | { kind: 'idle'; ms: number }
+  /**
+   * The counter `name` goes from below `value` to `value` or more (e.g. a
+   * progress bar filling up). Fires for assets in their time window.
+   */
+  | { kind: 'varReaches'; name: string; value: number };
 
 export type TriggerKind = Trigger['kind'];
 
@@ -34,7 +40,9 @@ export type GestureEvent =
   | { kind: 'hold'; ms: number }
   | { kind: 'swipe'; dir: Direction }
   | { kind: 'drop'; zoneId: string }
-  | { kind: 'idle' };
+  | { kind: 'idle' }
+  /** A counter changed (vars.ts). */
+  | ({ kind: 'var' } & VarChange);
 
 export type Action =
   /** Resume playback, breaking out of a freeze, loop or jump. */
@@ -46,7 +54,13 @@ export type Action =
       kind: 'cta';
       playStoreLink?: string | null;
       appStoreLink?: string | null;
-    };
+    }
+  /** Add `value` (may be negative) to the counter `name` (vars.ts). */
+  | { kind: 'addVar'; name: string; value: number }
+  /** Set the counter `name` to `value`. */
+  | { kind: 'setVar'; name: string; value: number };
+
+export type VarAction = Extract<Action, { kind: 'addVar' | 'setVar' }>;
 
 export type ActionKind = Action['kind'];
 
@@ -106,6 +120,9 @@ export function legacyFromAction(
         playStoreLink: a.playStoreLink ?? null,
         appStoreLink: a.appStoreLink ?? null,
       };
+    default:
+      // Counter actions have no old shape (the panel edits them directly).
+      return undefined;
   }
 }
 
@@ -130,6 +147,13 @@ export function triggerMatches(t: Trigger, e: GestureEvent): boolean {
       return e.kind === 'drop' && e.zoneId === t.dropZoneId;
     case 'idle':
       return e.kind === 'idle';
+    case 'varReaches':
+      return (
+        e.kind === 'var' &&
+        e.name === t.name &&
+        e.from < t.value &&
+        e.to >= t.value
+      );
     default:
       return false;
   }
@@ -277,9 +301,20 @@ export function ctaLinksOf(
     : null;
 }
 
-/** True when some gesture on the asset does something (idle isn't a gesture). */
+/** Triggers the viewer fires by touching the asset (idle and counters aren't). */
+const isGesture = (t: Trigger) => t.kind !== 'idle' && t.kind !== 'varReaches';
+
+/** True when some gesture on the asset does something. */
 export const hasActions = (x: Interactive) =>
-  interactionsOf(x).some((i) => i.trigger.kind !== 'idle' && i.actions.length);
+  interactionsOf(x).some((i) => isGesture(i.trigger) && i.actions.length);
+
+/**
+ * True when the actions move playback (play, seek, store). Only these break a
+ * freeze and use up a button; a counter tap leaves both in place, so it can
+ * be tapped again and again.
+ */
+export const movesPlayback = (actions: readonly Action[]): boolean =>
+  actions.some((a) => a.kind === 'play' || a.kind === 'seek' || a.kind === 'cta');
 
 /** `x` with its CTA actions' store links set (a CTA tap is added if it has none). */
 export function withCtaLinks<T extends Interactive>(
@@ -308,6 +343,8 @@ export interface ActionHost {
     playStoreLink: string | null;
     appStoreLink: string | null;
   }): void;
+  /** Change a counter (the renderer then fires what it reaches). */
+  setVar(a: VarAction): void;
 }
 
 /** Run actions in order on a renderer. */
@@ -325,6 +362,10 @@ export function runActions(actions: readonly Action[], host: ActionHost): void {
           playStoreLink: a.playStoreLink ?? null,
           appStoreLink: a.appStoreLink ?? null,
         });
+        break;
+      case 'addVar':
+      case 'setVar':
+        host.setVar(a);
         break;
     }
   }
