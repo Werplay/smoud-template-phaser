@@ -49,6 +49,8 @@ export type Action =
   | { kind: 'play' }
   /** Jump the video to `t` seconds (breaking out of what it leaves). */
   | { kind: 'seek'; t: number }
+  /** Switch to clip `clipId` (clips.ts), at `t` seconds into it (default 0). */
+  | { kind: 'goTo'; clipId: string; t?: number }
   /** Open the store. Links are per platform; the build bakes one pair in. */
   | {
       kind: 'cta';
@@ -309,12 +311,18 @@ export const hasActions = (x: Interactive) =>
   interactionsOf(x).some((i) => isGesture(i.trigger) && i.actions.length);
 
 /**
- * True when the actions move playback (play, seek, store). Only these break a
+ * True when the actions move playback (play, seek, another clip, store). Only these break a
  * freeze and use up a button; a counter tap leaves both in place, so it can
  * be tapped again and again.
  */
 export const movesPlayback = (actions: readonly Action[]): boolean =>
-  actions.some((a) => a.kind === 'play' || a.kind === 'seek' || a.kind === 'cta');
+  actions.some(
+    (a) =>
+      a.kind === 'play' ||
+      a.kind === 'seek' ||
+      a.kind === 'goTo' ||
+      a.kind === 'cta',
+  );
 
 /** `x` with its CTA actions' store links set (a CTA tap is added if it has none). */
 export function withCtaLinks<T extends Interactive>(
@@ -345,6 +353,8 @@ export interface ActionHost {
   }): void;
   /** Change a counter (the renderer then fires what it reaches). */
   setVar(a: VarAction): void;
+  /** Switch to another clip and play it from `t`. */
+  goTo(clipId: string, t: number): void;
 }
 
 /** Run actions in order on a renderer. */
@@ -366,6 +376,9 @@ export function runActions(actions: readonly Action[], host: ActionHost): void {
       case 'addVar':
       case 'setVar':
         host.setVar(a);
+        break;
+      case 'goTo':
+        host.goTo(a.clipId, a.t ?? 0);
         break;
     }
   }

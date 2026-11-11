@@ -1552,6 +1552,9 @@ export class PlayclipScene extends Phaser.Scene {
     }
 
     runActions(actions, {
+      // The export plays the first clip only until it learns clips (phase
+      // 1e, part 3); multi-clip exports are blocked until then.
+      goTo: () => {},
       // A counter change fires what it reaches on overlays on screen
       // (depth-capped, in case counters set each other in a loop).
       setVar: (a) => {
