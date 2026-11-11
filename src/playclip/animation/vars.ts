@@ -39,3 +39,46 @@ export const PROGRESS_DEFAULTS = {
   track: 'rgba(255,255,255,0.35)',
   radius: '999px',
 };
+
+// Counter roll-up: a text containing `{name}` shows that counter's value, and
+// counts up (or down) to each new value over ROLL_MS instead of jumping.
+
+export const ROLL_MS = 600;
+const TOKEN = /\{([A-Za-z_][\w-]*)\}/g;
+
+/** The counter names a text shows, e.g. "{taps}/10" → ["taps"]. */
+export const counterTokens = (text: string): string[] =>
+  Array.from(text.matchAll(new RegExp(TOKEN.source, 'g')), (m) => m[1]);
+
+/** `text` with each `{name}` replaced by `value(name)`. */
+export const fillCounters = (text: string, value: (name: string) => number) =>
+  text.replace(new RegExp(TOKEN.source, 'g'), (_, name: string) =>
+    String(value(name)),
+  );
+
+/** The value each counter shows while it rolls to its latest value. */
+export class RollingCounters {
+  private rolls = new Map<string, { from: number; to: number; t0: number }>();
+
+  /** The counter changed to `to` at `now` (ms). */
+  set(name: string, to: number, now: number): void {
+    this.rolls.set(name, { from: this.value(name, now), to, t0: now });
+  }
+
+  value(name: string, now: number): number {
+    const r = this.rolls.get(name);
+    if (!r) return 0;
+    const k = Math.min(1, Math.max(0, (now - r.t0) / ROLL_MS));
+    const eased = 1 - Math.pow(1 - k, 3);
+    return Math.round(r.from + (r.to - r.from) * eased);
+  }
+
+  /** True while some counter is still rolling. */
+  rolling(now: number): boolean {
+    return Array.from(this.rolls.values()).some((r) => now - r.t0 < ROLL_MS);
+  }
+
+  reset(): void {
+    this.rolls.clear();
+  }
+}
