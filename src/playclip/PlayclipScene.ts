@@ -19,8 +19,24 @@ import {
   type GestureEvent,
 } from './animation/interactions';
 import { IdleHints, Press, TapCounter } from './animation/gestures';
-import { fillOf, PROGRESS_DEFAULTS, Vars } from './animation/vars';
+import {
+  counterTokens,
+  fillCounters,
+  fillOf,
+  PROGRESS_DEFAULTS,
+  RollingCounters,
+  Vars,
+} from './animation/vars';
 import { clipIdOf, inClip, nextClipAfter } from './animation/clips';
+import {
+  confettiAlpha,
+  CONFETTI,
+  FLASH,
+  SHAKE,
+  spawnConfetti,
+  stepConfetti,
+  type EffectPreset,
+} from './animation/effects';
 import {
   isPingPong,
   reverseEndVideoTime,
@@ -277,6 +293,8 @@ interface Overlay {
   drag?: Vec2;
   // A progress bar: redraws its fill (0–1) each frame (see update()).
   drawFill?: (fill: number) => void;
+  // A text with {name} counters: what it last showed (see update()).
+  boundText?: string;
 }
 
 interface TextUnits {
@@ -339,8 +357,10 @@ export class PlayclipScene extends Phaser.Scene {
   private tapCounter = new TapCounter();
   // Idle hints: overlays with an idle trigger show once nothing is touched.
   private idleHints = new IdleHints(0);
-  // Counters for this run of the ad (animation/vars.ts).
+  // Counters for this run of the ad (animation/vars.ts), and the value each
+  // shows in texts while it rolls to its latest one.
   private vars = new Vars();
+  private rolling = new RollingCounters();
   private endcardAsset?: PlayclipAsset;
   private endcardOverlay?: Overlay;
   private videoEnded = false;
@@ -604,6 +624,54 @@ export class PlayclipScene extends Phaser.Scene {
     video.play(false);
   }
 
+  /** A one-shot screen effect (animation/effects.ts), over everything. */
+  private playEffect(preset: EffectPreset): void {
+    const { width: W, height: H } = this.scale.gameSize;
+    const top = 1e6;
+    if (preset === 'shake') {
+      this.cameras.main.shake(SHAKE.ms, SHAKE.amount);
+      return;
+    }
+    if (preset === 'flash') {
+      const r = this.add
+        .rectangle(W / 2, H / 2, W, H, colorInt(FLASH.color), FLASH.opacity)
+        .setDepth(top);
+      this.tweens.add({
+        targets: r,
+        alpha: 0,
+        duration: FLASH.ms,
+        onComplete: () => r.destroy(),
+      });
+      return;
+    }
+    const g = this.add.graphics().setDepth(top);
+    const pieces = spawnConfetti(W, H);
+    const start = this.time.now;
+    let last = start;
+    const tick = () => {
+      const now = this.time.now;
+      stepConfetti(pieces, Math.min(0.05, (now - last) / 1000), H);
+      last = now;
+      g.clear();
+      const alpha = confettiAlpha(now - start);
+      for (const p of pieces) {
+        // A small rectangle turned by its angle.
+        const c = Math.cos(p.angle);
+        const sn = Math.sin(p.angle);
+        const hw = p.size / 2;
+        const hh = p.size / 4;
+        const pt = (x: number, y: number) => ({ x: p.x + x * c - y * sn, y: p.y + x * sn + y * c });
+        g.fillStyle(colorInt(p.color), alpha);
+        g.fillPoints([pt(-hw, -hh), pt(hw, -hh), pt(hw, hh), pt(-hw, hh)], true);
+      }
+      if (now - start >= CONFETTI.ms) {
+        this.events.off(Phaser.Scenes.Events.UPDATE, tick);
+        g.destroy();
+      }
+    };
+    this.events.on(Phaser.Scenes.Events.UPDATE, tick);
+  }
+
   /** Make `id` the playing clip's controls and ping-pong map (no video change). */
   private useClip(id: string): void {
     this.activeClip = id;
@@ -822,7 +890,10 @@ export class PlayclipScene extends Phaser.Scene {
     const scaledPadY = padY * scale;
     const box = this.textBoxDimensions(asset, rect, orientation, st, scale);
 
-    text.setText(asset.content || '');
+    // {name} counters show their rolling value (see update()).
+    text.setText(
+      fillCounters(asset.content || '', (n) => this.rolling.value(n, this.time.now)),
+    );
     text.setStyle({
       fontFamily: st.fontFamily || 'Arial, sans-serif',
       fontSize: `${fontSize}px`,
@@ -1050,6 +1121,7 @@ export class PlayclipScene extends Phaser.Scene {
       appearedAt: 0,
       designScale: 1,
       layout: (rect, orientation) => this.layoutTextOverlay(text, asset, rect, orientation),
+      ...(counterTokens(asset.content || '').length ? { boundText: '' } : {}),
     };
   }
 
@@ -1626,10 +1698,12 @@ export class PlayclipScene extends Phaser.Scene {
 
     runActions(actions, {
       goTo: (clipId, t) => this.switchClip(clipId, t),
+      effect: (preset) => this.playEffect(preset),
       // A counter change fires what it reaches on overlays on screen
       // (depth-capped, in case counters set each other in a loop).
       setVar: (a) => {
         const c = this.vars.apply(a);
+        if (c) this.rolling.set(c.name, c.to, this.time.now);
         if (!c || depth >= 8) return;
         for (const o of this.overlays)
           if (o.wasVisible) this.activateButton(o, { kind: 'var', ...c }, depth + 1);
@@ -1845,6 +1919,19 @@ export class PlayclipScene extends Phaser.Scene {
         overlay.drag = undefined; // a dropped overlay snaps back
         overlay.root.setVisible(false);
         overlay.textUnits?.container.setVisible(false);
+      }
+      // A text showing counters is laid out again when what it shows changes.
+      if (overlay.wasVisible && overlay.asset.type === 'text' && overlay.boundText !== undefined) {
+        const shown = fillCounters(overlay.asset.content || '', (n) =>
+          this.rolling.value(n, this.time.now),
+        );
+        if (shown !== overlay.boundText) {
+          overlay.boundText = shown;
+          overlay.root.setScale(1, 1);
+          overlay.root.setAlpha(1);
+          overlay.layout(this.videoRect, this.orientation);
+          this.captureBase(overlay);
+        }
       }
       if (overlay.wasVisible) this.animateOverlay(overlay, t, end);
       if (overlay.wasVisible && overlay.drawFill && overlay.asset.progress) {

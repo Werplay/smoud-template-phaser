@@ -11,6 +11,7 @@
 
 import type { Direction } from './gestures';
 import type { VarChange } from './vars';
+import type { EffectPreset } from './effects';
 
 export type Trigger =
   | { kind: 'tap' }
@@ -60,7 +61,9 @@ export type Action =
   /** Add `value` (may be negative) to the counter `name` (vars.ts). */
   | { kind: 'addVar'; name: string; value: number }
   /** Set the counter `name` to `value`. */
-  | { kind: 'setVar'; name: string; value: number };
+  | { kind: 'setVar'; name: string; value: number }
+  /** A one-shot screen effect (effects.ts); playback carries on. */
+  | { kind: 'effect'; preset: EffectPreset };
 
 export type VarAction = Extract<Action, { kind: 'addVar' | 'setVar' }>;
 
@@ -372,6 +375,8 @@ export interface ActionHost {
   setVar(a: VarAction): void;
   /** Switch to another clip and play it from `t`. */
   goTo(clipId: string, t: number): void;
+  /** Play a screen effect. */
+  effect(preset: EffectPreset): void;
 }
 
 /** Run actions in order on a renderer. */
@@ -396,6 +401,9 @@ export function runActions(actions: readonly Action[], host: ActionHost): void {
         break;
       case 'goTo':
         host.goTo(a.clipId, a.t ?? 0);
+        break;
+      case 'effect':
+        host.effect(a.preset);
         break;
     }
   }
