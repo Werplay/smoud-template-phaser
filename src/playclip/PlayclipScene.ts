@@ -5,7 +5,18 @@ import { isEndcardVisible } from './endcard-visibility';
 import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
 import { layerOf } from './animation/layers';
-import { hasTapActions, runActions, tapActions } from './animation/interactions';
+import {
+  actionsFor,
+  dropZoneOf,
+  hasActions,
+  holdTimes,
+  interactionsOf,
+  needsPress,
+  runActions,
+  type Action,
+  type GestureEvent,
+} from './animation/interactions';
+import { Press, TapCounter } from './animation/gestures';
 import {
   isPingPong,
   reverseEndVideoTime,
@@ -246,6 +257,9 @@ interface Overlay {
   // Text animator: crops of the styled text's own texture, one per
   // character/word, shown in place of the text while it reveals.
   textUnits?: TextUnits;
+  // Where a drag trigger moved it (screen px); kept after a drop until the
+  // overlay leaves its window.
+  drag?: Vec2;
 }
 
 interface TextUnits {
@@ -293,6 +307,13 @@ export class PlayclipScene extends Phaser.Scene {
   private playclipData: PlayclipData = PLAYCLIP_DATA;
   private assets: PlayclipAsset[] = [];
   private overlays: Overlay[] = [];
+  // The press being read for hold / swipe / drag (animation/gestures.ts).
+  private press: {
+    overlay: Overlay;
+    p: Press;
+    timers: Phaser.Time.TimerEvent[];
+  } | null = null;
+  private tapCounter = new TapCounter();
   private endcardAsset?: PlayclipAsset;
   private endcardOverlay?: Overlay;
   private videoEnded = false;
@@ -442,6 +463,8 @@ export class PlayclipScene extends Phaser.Scene {
 
     this.scale.on('resize', this.relayout, this);
     this.input.on('pointerdown', this.onPointerDown, this);
+    this.input.on('pointermove', this.onPointerMove, this);
+    this.input.on('pointerup', this.onPointerUp, this);
 
     sdk.start();
     bindHeatmap();
@@ -1232,7 +1255,7 @@ export class PlayclipScene extends Phaser.Scene {
     return (
       overlay.asset.type === 'button' ||
       overlay.asset.type === 'transparent-button' ||
-      (overlay.asset.type === 'image' && hasTapActions(overlay.asset))
+      (overlay.asset.type === 'image' && hasActions(overlay.asset))
     );
   }
 
@@ -1291,38 +1314,108 @@ export class PlayclipScene extends Phaser.Scene {
     // are centre-origin, so centre ± displayWidth/2 covers each case uniformly.
     const px = pointer.worldX;
     const py = pointer.worldY;
-    let handled = false;
-    for (const overlay of this.overlays) {
-      if (!this.isInteractive(overlay) || overlay.clicked) continue;
-      const node = overlay.root as unknown as {
-        x: number;
-        y: number;
-        displayWidth: number;
-        displayHeight: number;
-        visible: boolean;
-      };
-      if (!node.visible) continue;
-      const halfW = (overlay.hitSize?.w ?? Math.abs(node.displayWidth)) / 2;
-      const halfH = (overlay.hitSize?.h ?? Math.abs(node.displayHeight)) / 2;
-      const cx = node.x - (overlay.anchorOffset?.x ?? 0);
-      const cy = node.y - (overlay.anchorOffset?.y ?? 0);
-      if (
-        px >= cx - halfW &&
-        px <= cx + halfW &&
-        py >= cy - halfH &&
-        py <= cy + halfH
-      ) {
-        this.activateButton(overlay);
-        handled = true;
-        break;
+    const overlay = this.overlayAt(px, py);
+    if (overlay) {
+      // Hold, swipe and drag need the whole press; plain taps fire at once.
+      if (needsPress(overlay.asset)) {
+        this.startPress(overlay, px, py);
+      } else {
+        const count = this.tapCounter.tap(overlay.asset.id, this.time.now);
+        this.activateButton(overlay, { kind: 'tap', count });
       }
+      return;
     }
 
-    if (!handled) {
-      const t = this.getPlaybackTime();
-      if (this.isEndcardClickable(t) && this.pointerHitsVideoRect(px, py)) {
-        this.activateEndcard();
-      }
+    const t = this.getPlaybackTime();
+    if (this.isEndcardClickable(t) && this.pointerHitsVideoRect(px, py)) {
+      this.activateEndcard();
+    }
+  }
+
+  // The interactive overlay under (px, py), hit-tested against each overlay's
+  // actual drawn rectangle (centre ± half its display size) rather than
+  // Phaser's `currentlyOver`. A button is a Container whose only sized child
+  // is a Graphics object, which reports no measurable bounds — so relying on
+  // the container's auto hit area / getBounds() leaves the clickable region
+  // not matching what's drawn. Both Containers and Images are centre-origin,
+  // so centre ± displayWidth/2 covers each case uniformly.
+  private overlayAt(px: number, py: number): Overlay | null {
+    for (const overlay of this.overlays) {
+      if (!this.isInteractive(overlay) || overlay.clicked) continue;
+      if (this.overlayContains(overlay, px, py)) return overlay;
+    }
+    return null;
+  }
+
+  private overlayContains(overlay: Overlay, px: number, py: number): boolean {
+    const node = overlay.root as unknown as {
+      x: number;
+      y: number;
+      displayWidth: number;
+      displayHeight: number;
+      visible: boolean;
+    };
+    if (!node.visible) return false;
+    const halfW = (overlay.hitSize?.w ?? Math.abs(node.displayWidth)) / 2;
+    const halfH = (overlay.hitSize?.h ?? Math.abs(node.displayHeight)) / 2;
+    const cx = node.x - (overlay.anchorOffset?.x ?? 0);
+    const cy = node.y - (overlay.anchorOffset?.y ?? 0);
+    return (
+      px >= cx - halfW &&
+      px <= cx + halfW &&
+      py >= cy - halfH &&
+      py <= cy + halfH
+    );
+  }
+
+  private startPress(overlay: Overlay, px: number, py: number): void {
+    this.endPress();
+    const p = new Press(px, py, this.time.now);
+    const timers = holdTimes(overlay.asset).map((ms) =>
+      this.time.delayedCall(ms, () => {
+        if (this.press?.p !== p || !p.still) return;
+        p.held = true;
+        this.activateButton(overlay, { kind: 'hold', ms });
+      }),
+    );
+    this.press = { overlay, p, timers };
+  }
+
+  private endPress(): void {
+    this.press?.timers.forEach((t) => t.remove());
+    this.press = null;
+  }
+
+  private onPointerMove(pointer: Phaser.Input.Pointer): void {
+    const press = this.press;
+    if (!press) return;
+    press.p.move(pointer.worldX, pointer.worldY, this.time.now);
+    if (dropZoneOf(press.overlay.asset) && !press.p.still)
+      press.overlay.drag = { x: press.p.dx, y: press.p.dy };
+  }
+
+  private onPointerUp(pointer: Phaser.Input.Pointer): void {
+    const press = this.press;
+    if (!press) return;
+    this.endPress();
+    const { overlay, p } = press;
+    const px = pointer.worldX;
+    const py = pointer.worldY;
+    const result = p.end(px, py, this.time.now);
+    const zoneId = dropZoneOf(overlay.asset);
+    if (zoneId && !p.still) {
+      const zone = this.overlays.find((o) => o.asset.id === zoneId);
+      const over = !!zone && this.overlayContains(zone, px, py);
+      // Dropped: it stays there until it leaves its window.
+      if (!over || !this.activateButton(overlay, { kind: 'drop', zoneId }))
+        overlay.drag = undefined;
+      return;
+    }
+    if (result?.kind === 'tap') {
+      const count = this.tapCounter.tap(overlay.asset.id, this.time.now);
+      this.activateButton(overlay, { kind: 'tap', count });
+    } else if (result?.kind === 'swipe') {
+      this.activateButton(overlay, result);
     }
   }
 
@@ -1348,14 +1441,22 @@ export class PlayclipScene extends Phaser.Scene {
     sdk.finish();
   }
 
-  private activateButton(overlay: Overlay): void {
+  // Run what `gesture` does on the overlay; true if anything ran.
+  private activateButton(overlay: Overlay, gesture: GestureEvent): boolean {
+    // A button with no interactions at all behaves as 'play' (as before).
+    const actions: Action[] = interactionsOf(overlay.asset).length
+      ? actionsFor(overlay.asset, gesture)
+      : gesture.kind === 'tap'
+        ? [{ kind: 'play' }]
+        : [];
+    if (!actions.length) return false;
+
     // Debounce a single appearance of the button; this is re-armed in update()
     // once the button leaves its time window (so it can be pressed again if its
     // range comes back around). It does NOT drive visibility — see update().
     overlay.clicked = true;
 
     const v = this.video;
-    const actions = tapActions(overlay.asset);
     track(actions.some((a) => a.kind === 'cta') ? 'ctaCall' : 'click', {
       element_id: overlay.asset.id,
       element_content: overlay.asset.content,
@@ -1369,8 +1470,7 @@ export class PlayclipScene extends Phaser.Scene {
       v.setPaused(false);
     }
 
-    // A button with no actions behaves as 'play' (as before).
-    runActions(actions.length ? actions : [{ kind: 'play' }], {
+    runActions(actions, {
       seek: (t) => {
         if (!v) return;
         // Seeking outside an active loop/jump breaks out of it (mirrors the
@@ -1414,6 +1514,7 @@ export class PlayclipScene extends Phaser.Scene {
         v.setPaused(false);
       },
     });
+    return true;
   }
 
   // --- Audio playback -----------------------------------------------------
@@ -1565,6 +1666,7 @@ export class PlayclipScene extends Phaser.Scene {
         overlay.root.setVisible(true);
       } else if (!within && overlay.wasVisible) {
         overlay.wasVisible = false;
+        overlay.drag = undefined; // a dropped overlay snaps back
         overlay.root.setVisible(false);
         overlay.textUnits?.container.setVisible(false);
       }
@@ -1601,7 +1703,11 @@ export class PlayclipScene extends Phaser.Scene {
     const s = sampleAnimation(style, { sinceStart: since, untilEnd: end - t }, overlay.asset.id);
     const k = overlay.designScale;
     const root = overlay.root;
-    root.setPosition(base.x + s.x * k, base.y + s.y * k);
+    const drag = overlay.drag;
+    root.setPosition(
+      base.x + s.x * k + (drag?.x ?? 0),
+      base.y + s.y * k + (drag?.y ?? 0),
+    );
     root.setScale(base.scaleX * s.scale, base.scaleY * s.scale);
     root.setAngle(base.angle + s.rotation);
     root.setAlpha(s.opacity);
@@ -1827,6 +1933,8 @@ export class PlayclipScene extends Phaser.Scene {
   shutdown(): void {
     this.scale.off('resize', this.relayout, this);
     this.input.off('pointerdown', this.onPointerDown, this);
+    this.input.off('pointermove', this.onPointerMove, this);
+    this.input.off('pointerup', this.onPointerUp, this);
     this.audioElements.forEach((el) => {
       el.pause();
       el.src = '';

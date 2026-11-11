@@ -3,11 +3,31 @@
 // Preview and the Phaser export.
 //
 // Buttons are the first to move onto it: an asset's old `buttonAction` (play /
-// seek / CTA) is a tap interaction with one action. Gestures, idle, variables,
-// clips and effects add trigger and action kinds as they land; Loop, Jump and
-// Freeze keep their own engine for now.
+// seek / CTA) is a tap interaction with one action. Gestures (tap count, hold,
+// swipe, drag onto a drop zone) are recognised by gestures.ts. Idle,
+// variables, clips and effects add trigger and action kinds as they land;
+// Loop, Jump and Freeze keep their own engine for now.
 
-export type Trigger = { kind: 'tap' };
+import type { Direction } from './gestures';
+
+export type Trigger =
+  | { kind: 'tap' }
+  /** `count` quick taps in a row (see TAP_COUNT_GAP). */
+  | { kind: 'tapCount'; count: number }
+  /** Pressed and held still for `ms`. */
+  | { kind: 'hold'; ms: number }
+  | { kind: 'swipe'; dir: Direction | 'any' }
+  /** The asset is dragged and dropped onto the asset `dropZoneId`. */
+  | { kind: 'drag'; dropZoneId: string };
+
+export type TriggerKind = Trigger['kind'];
+
+/** What a renderer recognised on an asset (gestures.ts). */
+export type GestureEvent =
+  | { kind: 'tap'; count: number }
+  | { kind: 'hold'; ms: number }
+  | { kind: 'swipe'; dir: Direction }
+  | { kind: 'drop'; zoneId: string };
 
 export type Action =
   /** Resume playback, breaking out of a freeze, loop or jump. */
@@ -89,43 +109,117 @@ export function interactionsOf(x: Interactive): Interaction[] {
   return a ? [{ id: TAP_ID, trigger: { kind: 'tap' }, actions: [a] }] : [];
 }
 
-/** Everything a tap on the asset does, in order. */
-export const tapActions = (x: Interactive): Action[] =>
+export function triggerMatches(t: Trigger, e: GestureEvent): boolean {
+  switch (t.kind) {
+    case 'tap':
+      return e.kind === 'tap';
+    case 'tapCount':
+      return e.kind === 'tap' && e.count === t.count;
+    case 'hold':
+      return e.kind === 'hold' && e.ms === t.ms;
+    case 'swipe':
+      return e.kind === 'swipe' && (t.dir === 'any' || t.dir === e.dir);
+    case 'drag':
+      return e.kind === 'drop' && e.zoneId === t.dropZoneId;
+    default:
+      return false;
+  }
+}
+
+/** Everything the gesture makes the asset do, in order. */
+export const actionsFor = (x: Interactive, e: GestureEvent): Action[] =>
   interactionsOf(x)
-    .filter((i) => i.trigger.kind === 'tap')
+    .filter((i) => triggerMatches(i.trigger, e))
     .reduce<Action[]>((all, i) => all.concat(i.actions), []);
 
-/** The tap's first action (what the button panel edits). */
-export const primaryAction = (x: Interactive): Action | null =>
-  tapActions(x)[0] ?? null;
+/** Every action the asset has, whatever triggers it. */
+const allActions = (x: Interactive): Action[] =>
+  interactionsOf(x).reduce<Action[]>((all, i) => all.concat(i.actions), []);
 
-/** The tap's first action as the old shape, for the existing button UI. */
+/** What a plain tap on the asset does. */
+export const tapActions = (x: Interactive): Action[] =>
+  actionsFor(x, { kind: 'tap', count: 1 });
+
+/**
+ * True when the asset needs the whole press (hold, swipe or drag), so a tap
+ * is only known on release. Assets without these keep firing on press.
+ */
+export const needsPress = (x: Interactive): boolean =>
+  interactionsOf(x).some(
+    (i) =>
+      i.trigger.kind === 'hold' ||
+      i.trigger.kind === 'swipe' ||
+      i.trigger.kind === 'drag',
+  );
+
+/** Hold durations (ms) the asset listens for. */
+export const holdTimes = (x: Interactive): number[] =>
+  Array.from(
+    new Set(
+      interactionsOf(x).flatMap((i) =>
+        i.trigger.kind === 'hold' ? [i.trigger.ms] : [],
+      ),
+    ),
+  );
+
+/** The drop zone a drag trigger targets (the asset is then draggable). */
+export const dropZoneOf = (x: Interactive): string | null => {
+  for (const i of interactionsOf(x))
+    if (i.trigger.kind === 'drag') return i.trigger.dropZoneId;
+  return null;
+};
+
+/** The first interaction's trigger (what the panel edits; a tap by default). */
+export const primaryTrigger = (x: Interactive): Trigger =>
+  interactionsOf(x)[0]?.trigger ?? { kind: 'tap' };
+
+/** The first interaction's first action (what the panel edits). */
+export const primaryAction = (x: Interactive): Action | null =>
+  interactionsOf(x)[0]?.actions[0] ?? null;
+
+/** The first action as the old shape, for the existing button UI. */
 export const buttonActionOf = (x: Interactive) =>
   legacyFromAction(primaryAction(x));
 
 /**
- * `x` with its tap's first action set (or removed, with null). The data moves
- * onto `interactions`; any old `buttonAction` is dropped.
+ * `x` with its first interaction's first action set (or removed, with null).
+ * The data moves onto `interactions`; any old `buttonAction` is dropped.
  */
 export function withPrimaryAction<T extends Interactive>(
   x: T,
   action: Action | null,
 ): T {
   const all = interactionsOf(x);
-  const i = all.findIndex((n) => n.trigger.kind === 'tap');
-  const tap = i >= 0 ? all[i] : null;
-  const rest = tap ? tap.actions.slice(1) : [];
+  const first = all[0];
+  const rest = first ? first.actions.slice(1) : [];
   const actions = action ? [action, ...rest] : rest;
   const next = all.slice();
   const updated: Interaction = {
-    id: tap?.id ?? TAP_ID,
-    trigger: { kind: 'tap' },
+    id: first?.id ?? TAP_ID,
+    trigger: first?.trigger ?? { kind: 'tap' },
     actions,
   };
-  if (i >= 0) {
-    if (actions.length) next[i] = updated;
-    else next.splice(i, 1);
+  if (first) {
+    if (actions.length) next[0] = updated;
+    else next.splice(0, 1);
   } else if (actions.length) next.push(updated);
+  const out = { ...x, interactions: next } as T;
+  delete (out as Interactive).buttonAction;
+  return out;
+}
+
+/**
+ * `x` with its first interaction's trigger set. With no interaction yet, one
+ * is added that plays the video (buttons always do something).
+ */
+export function withPrimaryTrigger<T extends Interactive>(
+  x: T,
+  trigger: Trigger,
+): T {
+  const all = interactionsOf(x);
+  const next = all.length
+    ? [{ ...all[0], trigger }, ...all.slice(1)]
+    : [{ id: TAP_ID, trigger, actions: [{ kind: 'play' } as Action] }];
   const out = { ...x, interactions: next } as T;
   delete (out as Interactive).buttonAction;
   return out;
@@ -146,7 +240,7 @@ export function migrateInteractions<T extends Interactive>(x: T): T {
 export function ctaLinksOf(
   x: Interactive,
 ): { playStoreLink: string | null; appStoreLink: string | null } | null {
-  const a = tapActions(x).find((n) => n.kind === 'cta');
+  const a = allActions(x).find((n) => n.kind === 'cta');
   return a && a.kind === 'cta'
     ? {
         playStoreLink: a.playStoreLink ?? null,
@@ -155,7 +249,8 @@ export function ctaLinksOf(
     : null;
 }
 
-export const hasTapActions = (x: Interactive) => tapActions(x).length > 0;
+/** True when some gesture on the asset does something. */
+export const hasActions = (x: Interactive) => allActions(x).length > 0;
 
 /** `x` with its CTA actions' store links set (a CTA tap is added if it has none). */
 export function withCtaLinks<T extends Interactive>(
