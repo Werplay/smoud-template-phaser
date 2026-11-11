@@ -7,6 +7,7 @@ import type { GlowStyle, GradientStyle, ShadowStyle, StrokeStyle } from './anima
 
 import type { OrientationFrames } from './animation/frame';
 import type { ReversedSegment } from './animation/pingpong';
+import type { Interaction } from './animation/interactions';
 
 export type Orientation = 'portrait' | 'landscape';
 
@@ -94,7 +95,10 @@ export interface PlayclipAsset {
   content: string;
   position: OrientationValue<Vec2>;
   style?: OrientationValue<AssetStyle>;
+  /** @deprecated Older payloads; buttons now use `interactions`. */
   buttonAction?: ButtonAction;
+  /** What the viewer can do with the asset (see animation/interactions.ts). */
+  interactions?: Interaction[];
   imageUrl?: string;
   audioUrl?: string;
   audioAction?: AudioAction;
