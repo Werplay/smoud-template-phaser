@@ -31,7 +31,12 @@ export type Trigger =
    * The counter `name` goes from below `value` to `value` or more (e.g. a
    * progress bar filling up). Fires for assets in their time window.
    */
-  | { kind: 'varReaches'; name: string; value: number };
+  | { kind: 'varReaches'; name: string; value: number }
+  /**
+   * The playhead passes `t` (seconds on the asset's clip) while playing
+   * forward and the asset is on screen (timeline-rules.ts `crossed`).
+   */
+  | { kind: 'timeReached'; t: number };
 
 export type TriggerKind = Trigger['kind'];
 
@@ -43,7 +48,9 @@ export type GestureEvent =
   | { kind: 'drop'; zoneId: string }
   | { kind: 'idle' }
   /** A counter changed (vars.ts). */
-  | ({ kind: 'var' } & VarChange);
+  | ({ kind: 'var' } & VarChange)
+  /** The playhead moved forward from `from` to `to` this frame. */
+  | { kind: 'time'; from: number; to: number };
 
 export type Action =
   /** Resume playback, breaking out of a freeze, loop or jump. */
@@ -164,6 +171,13 @@ export function triggerMatches(t: Trigger, e: GestureEvent): boolean {
       return e.kind === 'drop' && e.zoneId === t.dropZoneId;
     case 'idle':
       return e.kind === 'idle';
+    case 'timeReached':
+      return (
+        e.kind === 'time' &&
+        e.from < t.t - 0.001 &&
+        e.to >= t.t - 0.001 &&
+        e.to - e.from < 1
+      );
     case 'varReaches':
       return (
         e.kind === 'var' &&
@@ -324,7 +338,12 @@ export function ctaLinksOf(
 }
 
 /** Triggers the viewer fires by touching the asset (idle and counters aren't). */
-const isGesture = (t: Trigger) => t.kind !== 'idle' && t.kind !== 'varReaches';
+const isGesture = (t: Trigger) =>
+  t.kind !== 'idle' && t.kind !== 'varReaches' && t.kind !== 'timeReached';
+
+/** True when some interaction fires as the playhead passes a time. */
+export const hasTimeTriggers = (x: Interactive) =>
+  interactionsOf(x).some((i) => i.trigger.kind === 'timeReached');
 
 /** True when some gesture on the asset does something. */
 export const hasActions = (x: Interactive) =>
