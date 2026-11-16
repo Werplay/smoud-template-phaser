@@ -10,6 +10,7 @@ import {
   dropZoneOf,
   hasActions,
   holdTimes,
+  hasTimeTriggers,
   idleMsOf,
   interactionsOf,
   movesPlayback,
@@ -28,6 +29,7 @@ import {
   Vars,
 } from './animation/vars';
 import { clipIdOf, inClip, nextClipAfter } from './animation/clips';
+import { TimelineRules } from './animation/timeline-rules';
 import {
   confettiAlpha,
   CONFETTI,
@@ -410,16 +412,10 @@ export class PlayclipScene extends Phaser.Scene {
   private pingPong: ReversedSegment[] = [];
   private jumps: Control[] = [];
   private freezes: Control[] = [];
-  private currentLoop: Control | null = null;
-  private currentJump: Control | null = null;
-  private currentFreeze: Control | null = null;
-  // Previous video time seen by applyFreezes; -1 so a freeze at t=0 can still fire
-  // once playback starts. Used to detect the playhead crossing a freeze point even
-  // when a frame jumps past it.
-  private lastFreezeTime = -1;
-  // Freeze ids already stopped on; kept until the playhead leaves their window so
-  // breaking out of a freeze doesn't immediately re-trap it.
-  private triggeredFreezes = new Set<string>();
+  // Loops, jumps and freezes: the engine shared with the editor and Preview
+  // (animation/timeline-rules.ts); applyRules() carries out its commands.
+  // Ping-pong backward halves are baked into the video here.
+  private rules = new TimelineRules([], [], [], true);
 
   // Multi-clip playables (animation/clips.ts): every clip, the one playing,
   // and every clip's controls (this.loops/jumps/freezes are the playing one's).
@@ -673,7 +669,7 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   /** Make `id` the playing clip's controls and ping-pong map (no video change). */
-  private useClip(id: string): void {
+  private useClip(id: string, at = -1): void {
     this.activeClip = id;
     const clip = this.clips.find((c) => c.id === id);
     const mine = (list: Control[]) => inClip(list, id, this.clips);
@@ -684,6 +680,15 @@ export class PlayclipScene extends Phaser.Scene {
       clip && clip !== this.clips[0]
         ? (clip.pingPong ?? [])
         : (this.playclipData.video?.pingPong ?? []);
+    // A ping-pong loop whose reversed copy couldn't be baked plays forward.
+    const baked = (l: Control) =>
+      this.pingPong.some((s) => s.startTime === l.startTime && s.endTime === l.endTime);
+    this.rules.setRules(
+      this.loops.map((l) => (isPingPong(l) && !baked(l) ? { ...l, mode: 'forward' } : l)),
+      this.jumps,
+      this.freezes,
+      at,
+    );
   }
 
   /** True for assets of the playing clip. */
@@ -696,12 +701,7 @@ export class PlayclipScene extends Phaser.Scene {
     const v = this.video;
     if (!v || !this.clips.some((c) => c.id === id)) return;
     const changed = id !== this.activeClip;
-    this.useClip(id);
-    this.currentLoop = null;
-    this.currentJump = null;
-    this.currentFreeze = null;
-    this.triggeredFreezes.clear();
-    this.lastFreezeTime = t;
+    this.useClip(id, t);
     this.videoEnded = false;
     this.overlays.forEach((o) => (o.clicked = false));
     if (changed) {
@@ -1682,17 +1682,17 @@ export class PlayclipScene extends Phaser.Scene {
     if (moves) overlay.clicked = true;
 
     const v = this.video;
-    if (gesture.kind !== 'idle' && gesture.kind !== 'var')
+    if (gesture.kind !== 'idle' && gesture.kind !== 'var' && gesture.kind !== 'time')
       track(actions.some((a) => a.kind === 'cta') ? 'ctaCall' : 'click', {
         element_id: overlay.asset.id,
         element_content: overlay.asset.content,
       });
 
     // Pressing any button breaks out of an active freeze and resumes playback.
-    // The freeze stays in triggeredFreezes so it won't immediately re-trap as the
+    // The freeze stays triggered (timeline-rules.ts) so it won't re-trap as the
     // playhead plays back out through its window.
-    if (moves && this.currentFreeze && v) {
-      this.currentFreeze = null;
+    if (moves && this.rules.freeze && v) {
+      this.rules.freeze = null;
       v.setPaused(false);
     }
 
@@ -1710,18 +1710,10 @@ export class PlayclipScene extends Phaser.Scene {
       },
       seek: (t) => {
         if (!v) return;
-        // Seeking outside an active loop/jump breaks out of it (mirrors the
-        // HTML runtime's handleButtonClick loop-breakout behaviour).
-        if (
-          this.currentLoop &&
-          (t < this.currentLoop.startTime || t > this.currentLoop.endTime)
-        ) {
-          this.currentLoop = null;
-        }
-        this.currentJump = null;
+        // A seek leaves the active rule (a loop it lands in takes over again),
+        // and isn't read as passing the freezes in between.
         this.seekSrc(v, t);
-        // Re-baseline so the seek isn't read as a frame-by-frame freeze crossing.
-        this.lastFreezeTime = t;
+        this.rules.seeked(t);
         v.setPaused(false);
       },
       cta: () => {
@@ -1739,15 +1731,9 @@ export class PlayclipScene extends Phaser.Scene {
         // just past the loop end — otherwise it would re-engage at once and the
         // button would never leave its time window.
         if (!v) return;
-        if (this.currentLoop) {
-          const resumeAt = this.currentLoop.endTime + 0.001;
-          this.currentLoop = null;
-          // Past the loop end, so also past a ping-pong loop's reversed copy.
-          this.seekSrc(v, resumeAt);
-          // Re-baseline so the loop-breakout seek isn't read as a freeze crossing.
-          this.lastFreezeTime = resumeAt;
-        }
-        this.currentJump = null;
+        // Past the loop end, so also past a ping-pong loop's reversed copy.
+        const resumeAt = this.rules.playOn();
+        if (resumeAt !== null) this.seekSrc(v, resumeAt);
         v.setPaused(false);
       },
     });
@@ -1760,7 +1746,7 @@ export class PlayclipScene extends Phaser.Scene {
     if (!this.started) return;
 
     const v = this.video;
-    const isFrozen = !!this.currentFreeze;
+    const isFrozen = !!this.rules.freeze;
     const videoPaused = v?.isPaused() ?? true;
 
     // Find the first audio asset whose time window covers the current playhead.
@@ -1873,8 +1859,7 @@ export class PlayclipScene extends Phaser.Scene {
       // A freeze holds the playhead until a button breaks out of it; while held,
       // don't let loops/jumps move it. Otherwise loops/jumps may seek the
       // playhead before we evaluate visibility.
-      if (!this.currentFreeze) this.applyLoopsAndJumps(v!);
-      this.applyFreezes(v!);
+      this.applyRules(v!);
     }
 
     const postRoll = this.videoEnded ? this.getPostRollConfig() : null;
@@ -2012,11 +1997,11 @@ export class PlayclipScene extends Phaser.Scene {
     }
   }
 
-  // Loops repeat a segment; jumps skip a segment. Loop takes precedence.
-  // Mirrors the playclip HTML runtime's checkLoops/checkJumps behaviour.
-  private applyLoopsAndJumps(v: Phaser.GameObjects.Video): void {
+  // Loops, jumps and freezes, decided by the shared engine (timeline-rules.ts)
+  // as in the editor and Preview; the baked ping-pong copy is handled here.
+  private applyRules(v: Phaser.GameObjects.Video): void {
     const now = this.srcTime(v);
-    const t = now.time;
+    const loop = this.rules.loop;
     const bakedIndex = (l: Control) =>
       isPingPong(l)
         ? this.pingPong.findIndex(
@@ -2026,105 +2011,35 @@ export class PlayclipScene extends Phaser.Scene {
 
     // Never play a reversed copy outside its own active loop (e.g. reaching it
     // after the loop was broken): skip to just past it.
-    if (now.reversing && !(this.currentLoop && bakedIndex(this.currentLoop) === now.segment)) {
-      this.seekSrc(v, this.pingPong[now.segment].endTime + 0.001);
+    if (now.reversing && !(loop && bakedIndex(loop) === now.segment)) {
+      const past = this.pingPong[now.segment].endTime + 0.001;
+      this.seekSrc(v, past);
+      this.rules.seeked(past);
+      return;
+    }
+    // Ping-pong: forward runs straight on into the reversed copy; at its end,
+    // start the forward pass again.
+    const seg = loop ? bakedIndex(loop) : -1;
+    if (loop && seg >= 0 && v.getCurrentTime() >= reverseEndVideoTime(this.pingPong, seg) - 0.02) {
+      this.seekSrc(v, loop.startTime + 0.001);
       return;
     }
 
-    if (this.currentLoop) {
-      const seg = bakedIndex(this.currentLoop);
-      if (seg >= 0) {
-        // Ping-pong: forward runs straight on into the reversed copy; at the
-        // end of that, start the forward pass again.
-        if (v.getCurrentTime() >= reverseEndVideoTime(this.pingPong, seg) - 0.02) {
-          this.seekSrc(v, this.currentLoop.startTime + 0.001);
-          return;
-        }
-      } else if (t >= this.currentLoop.endTime - 0.02) {
-        this.seekSrc(v, this.currentLoop.startTime + 0.001);
-        return;
-      }
-      if (t < this.currentLoop.startTime || t > this.currentLoop.endTime + 0.1) {
-        this.currentLoop = null;
-      }
-    } else {
-      const found = this.loops.find((l) => t >= l.startTime && t <= l.endTime);
-      if (found) {
-        this.currentLoop = found;
-        return;
+    for (const c of this.rules.step(now.time)) {
+      if (c.kind === 'seek') {
+        this.seekSrc(v, c.t);
+      } else if (c.kind === 'hold') {
+        // A freeze: stop on its exact frame and hold until a button breaks out.
+        if (Math.abs(now.time - c.t) > 0.001) this.seekSrc(v, c.t);
+        if (!v.isPaused()) v.setPaused(true);
       }
     }
-    if (this.currentLoop) return; // a loop owns the playhead
 
-    if (this.currentJump) {
-      if (t < this.currentJump.startTime || t > this.currentJump.endTime + 0.1) {
-        this.currentJump = null;
-      }
-    } else {
-      const found = this.jumps.find((j) => t >= j.startTime - 0.26 && t <= j.startTime);
-      if (found) {
-        this.currentJump = found;
-        this.seekSrc(v, found.endTime + 0.001);
-      }
-    }
-  }
-
-  // A freeze stops the video at its startTime and holds it there until a button
-  // is pressed to break out (see activateButton). Mirrors the HTML runtime's
-  // checkFreezes: once broken out of, the freeze stays in triggeredFreezes so it
-  // doesn't immediately re-trap as the playhead plays back out through its window,
-  // and re-arms once the playhead leaves the window.
-  private applyFreezes(v: Phaser.GameObjects.Video): void {
-    if (this.freezes.length === 0) return;
-    const t = this.srcTime(v).time;
-    const prev = this.lastFreezeTime;
-    this.lastFreezeTime = t;
-
-    // Loops and jumps take priority over freezes.
-    if (this.currentLoop || this.currentJump) return;
-
-    if (this.currentFreeze) {
-      // A freeze holds at its startTime; release only once the playhead has moved
-      // outside that hold window (e.g. a seek action). Otherwise keep it held.
-      if (
-        t < this.currentFreeze.startTime - 0.001 ||
-        t > this.currentFreeze.startTime + 0.1
-      ) {
-        this.currentFreeze = null;
-      } else if (!v.isPaused()) {
-        v.setPaused(true);
-      }
-      return;
-    }
-
-    // Re-arm freezes once the playhead has left their hold window.
-    this.freezes.forEach((f) => {
-      if (
-        this.triggeredFreezes.has(f.id) &&
-        (t < f.startTime - 0.001 || t > f.startTime + 0.1)
-      ) {
-        this.triggeredFreezes.delete(f.id);
-      }
-    });
-
-    // Stop at the first not-yet-triggered freeze the playhead has reached or
-    // crossed since the last frame (so a frame that jumps past it still stops
-    // instead of skipping), seeking back to the exact freeze frame to hold it.
-    const found = this.freezes.find(
-      (f) =>
-        !this.triggeredFreezes.has(f.id) &&
-        t >= f.startTime - 0.001 &&
-        prev < f.startTime - 0.001,
-    );
-    if (found) {
-      this.currentFreeze = found;
-      this.triggeredFreezes.add(found.id);
-      if (Math.abs(t - found.startTime) > 0.001) {
-        this.seekSrc(v, found.startTime);
-        this.lastFreezeTime = found.startTime;
-      }
-      v.setPaused(true);
-    }
+    // "The video reaches a time" interactions on overlays on screen.
+    if (this.rules.to > this.rules.from)
+      for (const o of this.overlays)
+        if (o.wasVisible && hasTimeTriggers(o.asset))
+          this.activateButton(o, { kind: 'time', from: this.rules.from, to: this.rules.to });
   }
 
   private relayout = (): void => {
@@ -2189,7 +2104,7 @@ export class PlayclipScene extends Phaser.Scene {
 
   resumeVideo(): void {
     // Don't fight an active freeze hold (the SDK may resume on app foreground).
-    if (!this.currentFreeze) this.video?.setPaused(false);
+    if (!this.rules.freeze) this.video?.setPaused(false);
   }
 
   setVolumeLevel(value: number): void {
