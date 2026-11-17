@@ -115,6 +115,8 @@ export interface PlayclipAsset {
   progress?: { variable: string; max: number };
   /** The clip it belongs to (animation/clips.ts); absent = the first. */
   clipId?: string;
+  /** Shown with the end card (global, timed with it after the clip that ends the ad). */
+  onEndCard?: boolean;
 }
 
 /** One clip of a multi-clip playable; the first clip's video is `video`. */
