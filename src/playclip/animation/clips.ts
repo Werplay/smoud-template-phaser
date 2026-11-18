@@ -55,3 +55,21 @@ export function nextClipAfter(
       : null;
   return null;
 }
+
+/**
+ * The end card (and assets on it) is stored timed after the first clip. It
+ * shows after whichever clip ends the ad, at the same offset from that clip's
+ * end: the seconds to add to its stored window on clip `clipId`, or null
+ * while playback will go on to another clip (it's hidden there). A
+ * single-video playable never shifts.
+ */
+export function endCardShift(clipId: string, clips: readonly ClipLike[]): number | null {
+  if (clips.length < 2) return 0;
+  const clip = clips.find((c) => c.id === clipId);
+  if (!clip || nextClipAfter(clipId, clips) !== null) return null;
+  return clip.duration - clips[0].duration;
+}
+
+/** True for the end card and assets shown with it (global to every clip). */
+export const onEndCard = (a: { type: string; onEndCard?: boolean }) =>
+  a.type === 'endcard' || !!a.onEndCard;

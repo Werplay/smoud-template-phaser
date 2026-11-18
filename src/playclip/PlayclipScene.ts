@@ -28,7 +28,7 @@ import {
   RollingCounters,
   Vars,
 } from './animation/vars';
-import { clipIdOf, inClip, nextClipAfter } from './animation/clips';
+import { clipIdOf, endCardShift, inClip, nextClipAfter, onEndCard } from './animation/clips';
 import { TimelineRules } from './animation/timeline-rules';
 import {
   confettiAlpha,
@@ -601,7 +601,7 @@ export class PlayclipScene extends Phaser.Scene {
       if (this.endcardAsset && this.endcardOverlay) {
         this.postRollClockStart = this.time.now;
         const t = this.getPlaybackTime();
-        if (isEndcardVisible(this.endcardAsset, t, true)) {
+        if (this.endcardVisible(t, true)) {
           this.endcardOverlay.wasVisible = true;
           this.endcardOverlay.root.setVisible(true);
         }
@@ -691,9 +691,31 @@ export class PlayclipScene extends Phaser.Scene {
     );
   }
 
-  /** True for assets of the playing clip. */
-  private inActiveClip(asset: { clipId?: string }): boolean {
+  /** True for assets of the playing clip (the end card's are every clip's). */
+  private inActiveClip(asset: { clipId?: string; type?: string; onEndCard?: boolean }): boolean {
+    if (asset.type && onEndCard(asset as { type: string })) return true;
     return !this.clips.length || clipIdOf(asset, this.clips) === this.activeClip;
+  }
+
+  /**
+   * `asset` timed on the playing clip. The end card and assets on it are
+   * stored after the first clip and show after the clip that ends the ad
+   * (animation/clips.ts endCardShift); null while they're hidden.
+   */
+  private onClip<T extends { type: string; time: number; endTime?: number; onEndCard?: boolean }>(
+    asset: T,
+  ): T | null {
+    if (!onEndCard(asset)) return asset;
+    const shift = endCardShift(this.activeClip, this.clips);
+    if (shift === null) return null;
+    if (shift === 0) return asset;
+    const end = asset.endTime ?? asset.time + 5;
+    return { ...asset, time: asset.time + shift, endTime: end + shift };
+  }
+
+  private endcardVisible(time: number, ended: boolean): boolean {
+    const card = this.endcardAsset && this.onClip(this.endcardAsset);
+    return !!card && isEndcardVisible(card, time, ended);
   }
 
   /** Play clip `id` from `t` (a goTo action, or a clip carrying on). */
@@ -1496,7 +1518,7 @@ export class PlayclipScene extends Phaser.Scene {
     if (!root.visible) return false;
     if (!this.videoReady || !this.video) return false;
     if (!this.video.isPaused() && !this.videoEnded) return false;
-    if (!isEndcardVisible(this.endcardAsset, time, this.videoEnded)) return false;
+    if (!this.endcardVisible(time, this.videoEnded)) return false;
     if (!this.videoEnded && this.hasVisiblePlayableOverlay(time)) return false;
     return true;
   }
@@ -1827,13 +1849,14 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   private getPostRollConfig(): PostRollConfig | null {
-    if (!this.endcardAsset || !this.video) return null;
+    const card = this.endcardAsset && this.onClip(this.endcardAsset);
+    if (!card || !this.video) return null;
     const duration = sourceDuration(this.video.getDuration(), this.pingPong);
     const videoDuration =
       Number.isFinite(duration) && duration > 0
         ? duration
-        : this.endcardAsset.time;
-    return getPostRollConfig(this.endcardAsset, videoDuration);
+        : card.time;
+    return getPostRollConfig(card, videoDuration);
   }
 
   /** Timeline clock for overlay visibility (includes synthetic post-roll time). */
@@ -1877,8 +1900,9 @@ export class PlayclipScene extends Phaser.Scene {
     this.applyAudio(t);
 
     for (const overlay of this.overlays) {
-      const start = overlay.asset.time;
-      const end = overlay.asset.endTime || overlay.asset.time + 5;
+      const timed = this.onClip(overlay.asset);
+      const start = timed ? timed.time : NaN;
+      const end = timed ? timed.endTime || timed.time + 5 : NaN;
       const inWindow = t >= start && t <= end && this.inActiveClip(overlay.asset);
 
       // Entry, loop and exit all happen inside the asset's window (the exit
@@ -1982,7 +2006,7 @@ export class PlayclipScene extends Phaser.Scene {
   private updateEndcardVisibility(time: number): void {
     if (!this.endcardAsset || !this.endcardOverlay) return;
 
-    const shouldShow = isEndcardVisible(this.endcardAsset, time, this.videoEnded);
+    const shouldShow = this.endcardVisible(time, this.videoEnded);
     const overlay = this.endcardOverlay;
 
     if (shouldShow && !overlay.wasVisible) {
