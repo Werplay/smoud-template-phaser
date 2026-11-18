@@ -117,6 +117,8 @@ export interface PlayclipAsset {
   clipId?: string;
   /** Shown with the end card (global, timed with it after the clip that ends the ad). */
   onEndCard?: boolean;
+  /** Text in other languages, by code (animation/locale.ts). */
+  texts?: Record<string, string>;
 }
 
 /** One clip of a multi-clip playable; the first clip's video is `video`. */

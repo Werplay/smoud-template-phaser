@@ -29,6 +29,7 @@ import {
   Vars,
 } from './animation/vars';
 import { clipIdOf, endCardShift, inClip, nextClipAfter, onEndCard } from './animation/clips';
+import { languagesOf, localize, pickLanguage } from './animation/locale';
 import { TimelineRules } from './animation/timeline-rules';
 import {
   confettiAlpha,
@@ -485,7 +486,12 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   create(): void {
-    const allAssets = this.rawAssets();
+    // Texts in the device's language when the export carries several
+    // (animation/locale.ts); a fixed-language export has none left.
+    const raw = this.rawAssets();
+    const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+    const lang = pickLanguage(languagesOf(raw), nav?.languages?.length ? nav.languages : [nav?.language ?? '']);
+    const allAssets = localize(raw, lang);
     const endcards = allAssets.filter((a) => a.type === 'endcard');
     if (endcards.length > 1) {
       console.warn('[PlayclipScene] Multiple endcard assets; using the first.');
