@@ -79,6 +79,24 @@ export class TimelineRules {
     this.from = this.to = t;
   }
 
+  /**
+   * A QA seek to `t` (Preview `?t=`, playclipQA.seek): as `seeked`, but
+   * landing inside a freeze's window (startTime to endTime) holds that freeze
+   * as if playback had reached it. Returns the freeze, to hold on its
+   * startTime frame, or null. Ordinary seeks keep using `seeked`.
+   */
+  seekedInto(t: number): RuleControl | null {
+    this.seeked(t);
+    const f = this.freezes.find(
+      (x) => t >= x.startTime - EPS && t <= Math.max(x.startTime, x.endTime) + EPS,
+    );
+    if (!f) return null;
+    this.freeze = f;
+    this.triggered.add(f.id);
+    this.last = this.from = this.to = f.startTime;
+    return f;
+  }
+
   /** A button broke out of the active loop, jump or freeze (playback resumes). */
   breakOut() {
     this.loop = null;

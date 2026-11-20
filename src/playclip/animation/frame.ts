@@ -146,6 +146,23 @@ export function stageLayout(
   };
 }
 
+/**
+ * The end card's background in a W×H stage: always the whole screen, never
+ * just the frame, so a tall or wide phone shows no bars (blur or letterbox)
+ * around it; its image (width ÷ height `imageAspect`) covers it, centred, as
+ * CSS `background-size: cover`. The end card's content stays in the frame.
+ */
+export function endcardLayout(
+  W: number,
+  H: number,
+  imageAspect?: number | null,
+): { rect: Rect; image: Rect | null } {
+  return {
+    rect: { left: 0, top: 0, width: W, height: H },
+    image: imageAspect && imageAspect > 0 ? coverRect(imageAspect, W, H) : null,
+  };
+}
+
 /** The same layout in device units (portrait 9×16, landscape 16×9). */
 export const designLayout = (
   orientation: Orientation,
