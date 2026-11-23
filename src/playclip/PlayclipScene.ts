@@ -2,6 +2,7 @@ import * as Phaser from 'phaser';
 import { sdk } from '@smoud/playable-sdk';
 import { PLAYCLIP_DATA } from '../playclip-data';
 import { isEndcardVisible } from './endcard-visibility';
+import { rearmAtFreeze } from './freeze-rearm';
 import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
 import { layerOf } from './animation/layers';
@@ -58,6 +59,7 @@ import {
 } from './animation/text';
 import {
   DESIGN_SCREEN,
+  endcardLayout,
   stageLayout,
   type OrientationFrames,
   type ResolvedFrame,
@@ -1259,28 +1261,38 @@ export class PlayclipScene extends Phaser.Scene {
       designScale: 1,
       layout: (rect, orientation) => {
         const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
+        // The label is designed in editor px, like the box: scale it with the
+        // box (the smaller of its width and height scale, so it still fits
+        // when the video is letterboxed), as text overlays and Preview do.
+        const design = this.designVideoBounds(asset, orientation, st, rect);
+        const k = Math.min(
+          design.width > 0 ? rect.width / design.width : 1,
+          design.height > 0 ? rect.height / design.height : 1,
+        );
+        const scale = Number.isFinite(k) && k > 0 ? k : 1;
 
         label.setText(asset.content || '');
         label.setStyle({
           fontFamily: st.fontFamily || 'Arial, sans-serif',
-          fontSize: `${st.fontSize || 20}px`,
+          fontSize: `${Math.max(1, (st.fontSize || 20) * scale)}px`,
           color: st.color || '#ffffff',
           fontStyle: fontStyleString(st),
         });
         if (st.stroke) {
           const sk = strokeOf(st.stroke);
-          label.setStroke(sk.color, sk.width);
+          label.setStroke(sk.color, sk.width * scale);
         } else {
           label.setStroke('#000000', 0);
         }
 
-        const padX = firstNumber(st.padding, 16) || 16;
-        const padY = Math.max(8, padX * 0.6);
+        const padX = (firstNumber(st.padding, 16) || 16) * scale;
+        const padY = Math.max(8 * scale, padX * 0.6);
         const wPct = this.widthPct(asset, orientation);
         const hPct = this.heightPct(asset, orientation);
         const bw = wPct ? wPct * rect.width : label.width + padX * 2;
         const bh = hPct ? hPct * rect.height : label.height + padY * 2;
-        const radius = firstNumber(st.borderRadius, 8);
+        // A pill's radius is designed for its box: never more than half its side.
+        const radius = Math.min(firstNumber(st.borderRadius, 8) * scale, bw / 2, bh / 2);
 
         graphics.clear();
         const fillColor = cssColorToInt(st.backgroundColor) ?? 0x6d28d9;
@@ -1474,7 +1486,12 @@ export class PlayclipScene extends Phaser.Scene {
       wasVisible: false,
       appearedAt: 0,
       designScale: 1,
-      layout: (rect, _orientation) => {
+      // Laid out in the whole screen, not the frame (endcardLayout), the
+      // image covering it like the Preview's background-size: cover.
+      layout: (_rect, _orientation) => {
+        const { width: W, height: H } = this.scale.gameSize;
+        const aspect = bgImage ? bgImage.width / (bgImage.height || 1) : null;
+        const { rect, image } = endcardLayout(W, H, aspect);
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
         container.setPosition(cx, cy);
@@ -1485,9 +1502,9 @@ export class PlayclipScene extends Phaser.Scene {
         bgGraphics.fillStyle(color, 1);
         bgGraphics.fillRect(-rect.width / 2, -rect.height / 2, rect.width, rect.height);
 
-        if (bgImage) {
-          bgImage.setPosition(-rect.width / 2, -rect.height / 2);
-          bgImage.setDisplaySize(rect.width, rect.height);
+        if (bgImage && image) {
+          bgImage.setPosition(image.left - cx, image.top - cy);
+          bgImage.setDisplaySize(image.width, image.height);
         }
       },
     };
@@ -1529,16 +1546,6 @@ export class PlayclipScene extends Phaser.Scene {
     return true;
   }
 
-  private pointerHitsVideoRect(px: number, py: number): boolean {
-    const r = this.videoRect;
-    return (
-      px >= r.left &&
-      px <= r.left + r.width &&
-      py >= r.top &&
-      py <= r.top + r.height
-    );
-  }
-
   private activateEndcard(): void {
     track('ctaCall', { element_id: 'endcard' });
     sdk.install();
@@ -1574,7 +1581,7 @@ export class PlayclipScene extends Phaser.Scene {
     }
 
     const t = this.getPlaybackTime();
-    if (this.isEndcardClickable(t) && this.pointerHitsVideoRect(px, py)) {
+    if (this.isEndcardClickable(t)) {
       this.activateEndcard();
     }
   }
@@ -2055,6 +2062,7 @@ export class PlayclipScene extends Phaser.Scene {
       return;
     }
 
+    const wasFrozen = this.rules.freeze;
     for (const c of this.rules.step(now.time)) {
       if (c.kind === 'seek') {
         this.seekSrc(v, c.t);
@@ -2064,6 +2072,16 @@ export class PlayclipScene extends Phaser.Scene {
         if (!v.isPaused()) v.setPaused(true);
       }
     }
+    // A freeze just started: buttons tapped before it arrived must be able
+    // to release it (freeze-rearm.ts).
+    const frozen = this.rules.freeze;
+    if (frozen && frozen !== wasFrozen)
+      rearmAtFreeze(this.overlays, frozen.startTime, (o) => {
+        const timed = this.onClip(o.asset);
+        return timed && this.inActiveClip(o.asset)
+          ? { start: timed.time, end: timed.endTime || timed.time + 5 }
+          : null;
+      });
 
     // "The video reaches a time" interactions on overlays on screen.
     if (this.rules.to > this.rules.from)
@@ -2109,10 +2127,8 @@ export class PlayclipScene extends Phaser.Scene {
 
     const mask = this.cropMask;
     if (!mask) return;
-    const masked = this.endcardOverlay
-      ? [...this.overlays, this.endcardOverlay]
-      : this.overlays;
-    masked.forEach((overlay) => {
+    // The end card's background covers the whole screen: never masked.
+    this.overlays.forEach((overlay) => {
       const root = overlay.root as unknown as {
         setMask?: (m: Phaser.Display.Masks.GeometryMask) => void;
       };
