@@ -31,6 +31,8 @@ import {
 } from './animation/vars';
 import { clipIdOf, endCardShift, inClip, nextClipAfter, onEndCard } from './animation/clips';
 import { languagesOf, localize, pickLanguage } from './animation/locale';
+import { canvasMeasure, fitFontPx, fitText, type MeasureText } from './animation/text-fit';
+import { FIRST_FRAME_FREEZE, onStartCard, startCardTap, startTapRelease, type StartCardTap } from './animation/start-card';
 import { TimelineRules } from './animation/timeline-rules';
 import {
   confettiAlpha,
@@ -394,6 +396,12 @@ export class PlayclipScene extends Phaser.Scene {
   private orientation: Orientation = 'landscape';
   // The playable holds on its first frame until the first tap anywhere.
   private started = false;
+  // Start card (animation/start-card.ts): what the first tap does, null = no card;
+  // and, after an 'interact' first tap, the opening freeze it releases.
+  private startTap: StartCardTap | null = null;
+  private pendingRelease: { freezeId: string; assetId: string } | null = null;
+  // Canvas text metrics for shrink-to-fit (animation/text-fit.ts).
+  private fitMeasure: MeasureText | null = canvasMeasure();
   // Scene time (ms) of the first tap; animations hold their first frame before it.
   private startedAt = 0;
   private posterHeld = false;
@@ -454,9 +462,22 @@ export class PlayclipScene extends Phaser.Scene {
       .filter((c): c is Control => !!c && typeof c.startTime === 'number');
   }
 
+  // The assets in the device's language (animation/locale.ts): texts, images
+  // and fonts. Computed once: preload() loads the images create() places.
+  private localized?: PlayclipAsset[];
+  private localizedAssets(): PlayclipAsset[] {
+    if (!this.localized) {
+      const raw = this.rawAssets();
+      const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+      const lang = pickLanguage(languagesOf(raw), nav?.languages?.length ? nav.languages : [nav?.language ?? '']);
+      this.localized = localize(raw, lang);
+    }
+    return this.localized;
+  }
+
   preload(): void {
     // Load image textures (data URIs) up front so create() can place them.
-    this.rawAssets().forEach((asset) => {
+    this.localizedAssets().forEach((asset) => {
       if (asset.type === 'image' && asset.imageUrl) {
         this.load.image(`img-${asset.id}`, asset.imageUrl);
       }
@@ -490,10 +511,7 @@ export class PlayclipScene extends Phaser.Scene {
   create(): void {
     // Texts in the device's language when the export carries several
     // (animation/locale.ts); a fixed-language export has none left.
-    const raw = this.rawAssets();
-    const nav = typeof navigator !== 'undefined' ? navigator : undefined;
-    const lang = pickLanguage(languagesOf(raw), nav?.languages?.length ? nav.languages : [nav?.language ?? '']);
-    const allAssets = localize(raw, lang);
+    const allAssets = this.localizedAssets();
     const endcards = allAssets.filter((a) => a.type === 'endcard');
     if (endcards.length > 1) {
       console.warn('[PlayclipScene] Multiple endcard assets; using the first.');
@@ -506,6 +524,7 @@ export class PlayclipScene extends Phaser.Scene {
       jumps: this.rawControls('jumps'),
       freezes: this.rawControls('freezes'),
     };
+    this.startTap = startCardTap(this.assets);
     this.useClip(this.clips[0]?.id ?? '');
     this.orientation = this.computeOrientation();
 
@@ -912,7 +931,10 @@ export class PlayclipScene extends Phaser.Scene {
     const st = (pickOriented(asset.style, orientation) || {}) as AssetStyle;
     const design = this.designVideoBounds(asset, orientation, st, rect);
     const scale = design.width > 0 ? rect.width / design.width : 1;
-    const baseFont = st.fontSize ?? 16;
+    // Shrunk only when the text overflows its box (animation/text-fit.ts).
+    const baseFont = this.fitMeasure
+      ? fitFontPx(fitText(asset.content || ''), st.fontSize ?? 16, st, 'text', this.fitMeasure).px
+      : (st.fontSize ?? 16);
     const fontSize = Math.max(1, baseFont * scale);
 
     const { x: padX, y: padY } = paddingXY(st.padding, 8, 12);
@@ -1272,9 +1294,13 @@ export class PlayclipScene extends Phaser.Scene {
         const scale = Number.isFinite(k) && k > 0 ? k : 1;
 
         label.setText(asset.content || '');
+        // Shrunk only when the label overflows its box (animation/text-fit.ts).
+        const labelPx = this.fitMeasure
+          ? fitFontPx(fitText(asset.content || ''), st.fontSize || 20, st, 'button', this.fitMeasure).px
+          : st.fontSize || 20;
         label.setStyle({
           fontFamily: st.fontFamily || 'Arial, sans-serif',
-          fontSize: `${Math.max(1, (st.fontSize || 20) * scale)}px`,
+          fontSize: `${Math.max(1, labelPx * scale)}px`,
           color: st.color || '#ffffff',
           fontStyle: fontStyleString(st),
         });
@@ -1348,7 +1374,9 @@ export class PlayclipScene extends Phaser.Scene {
           styledBg.setTexture(tex.key).setOrigin(0.5).setVisible(true);
         } else {
           styledBg?.setVisible(false);
-          graphics.fillStyle(fillColor, 1);
+          // An rgba() fill keeps its opacity, as in the preview (e.g. a start card's dim).
+          const fillAlpha = st.backgroundColor ? colorAndAlpha(st.backgroundColor).alpha : 1;
+          graphics.fillStyle(fillColor, fillAlpha);
           graphics.fillRoundedRect(-bw / 2, -bh / 2, bw, bh, radius);
           if (borderColor !== undefined) {
             graphics.lineStyle(borderWidth, borderColor, 1);
@@ -1558,6 +1586,17 @@ export class PlayclipScene extends Phaser.Scene {
     this.idleHints.input(this.time.now);
     if (!this.started) {
       this.startPlayback();
+      // An 'interact' start card: this tap also releases the opening freeze.
+      if (this.startTap === 'interact') {
+        const release = startTapRelease(this.assets, this.allControls.freezes as Array<{ id: string; startTime: number; clipId?: string }>);
+        if (release && release.t <= FIRST_FRAME_FREEZE) {
+          // A freeze on the first frame: this tap is its button's tap. Skip
+          // the freeze and run the tap now (start-card.ts).
+          this.rules.seeked(Math.max(this.video?.getCurrentTime() ?? 0, release.t + 0.001));
+          const target = this.overlays.find((o) => o.asset.id === release.assetId);
+          if (target) this.activateButton(target, { kind: 'tap', count: 1 });
+        } else this.pendingRelease = release;
+      }
       return;
     }
     // Hit-test against each overlay's actual drawn rectangle (centre ± half its
@@ -1916,7 +1955,13 @@ export class PlayclipScene extends Phaser.Scene {
       const timed = this.onClip(overlay.asset);
       const start = timed ? timed.time : NaN;
       const end = timed ? timed.endTime || timed.time + 5 : NaN;
-      const inWindow = t >= start && t <= end && this.inActiveClip(overlay.asset);
+      const card = onStartCard(overlay.asset);
+      // With a start card, only the card shows before the first tap, and never after.
+      const inWindow = this.startTap
+        ? card
+          ? !this.started
+          : this.started && t >= start && t <= end && this.inActiveClip(overlay.asset)
+        : t >= start && t <= end && this.inActiveClip(overlay.asset);
 
       // Entry, loop and exit all happen inside the asset's window (the exit
       // plays in its last animationDuration), so visibility is just the window
@@ -1955,7 +2000,7 @@ export class PlayclipScene extends Phaser.Scene {
           this.captureBase(overlay);
         }
       }
-      if (overlay.wasVisible) this.animateOverlay(overlay, t, end);
+      if (overlay.wasVisible) this.animateOverlay(overlay, t, card ? Infinity : end);
       if (overlay.wasVisible && overlay.drawFill && overlay.asset.progress) {
         const p = overlay.asset.progress;
         overlay.drawFill(fillOf(this.vars.get(p.variable), p.max));
@@ -1986,10 +2031,13 @@ export class PlayclipScene extends Phaser.Scene {
     const base = overlay.base;
     if (!base) return;
     const style = pickOriented(overlay.asset.style, this.orientation) as AnimStyle | undefined;
-    // Before the first tap the ad shows a poster: hold animations at frame 0.
-    const since = this.started
-      ? Math.max(0, (this.time.now - Math.max(overlay.appearedAt, this.startedAt)) / 1000)
-      : 0;
+    // Before the first tap the ad shows a poster: hold animations at frame 0,
+    // except the start card's, which animate from when it appeared.
+    const since = onStartCard(overlay.asset)
+      ? Math.max(0, (this.time.now - overlay.appearedAt) / 1000)
+      : this.started
+        ? Math.max(0, (this.time.now - Math.max(overlay.appearedAt, this.startedAt)) / 1000)
+        : 0;
     const s = sampleAnimation(style, { sinceStart: since, untilEnd: end - t }, overlay.asset.id);
     const k = overlay.designScale;
     const root = overlay.root;
@@ -2075,13 +2123,21 @@ export class PlayclipScene extends Phaser.Scene {
     // A freeze just started: buttons tapped before it arrived must be able
     // to release it (freeze-rearm.ts).
     const frozen = this.rules.freeze;
-    if (frozen && frozen !== wasFrozen)
+    if (frozen && frozen !== wasFrozen) {
       rearmAtFreeze(this.overlays, frozen.startTime, (o) => {
         const timed = this.onClip(o.asset);
         return timed && this.inActiveClip(o.asset)
           ? { start: timed.time, end: timed.endTime || timed.time + 5 }
           : null;
       });
+      // The start card's first tap counted as this freeze's tap (start-card.ts).
+      const pending = this.pendingRelease;
+      if (pending && (frozen as { id?: string }).id === pending.freezeId) {
+        this.pendingRelease = null;
+        const target = this.overlays.find((o) => o.asset.id === pending.assetId);
+        if (target) this.activateButton(target, { kind: 'tap', count: 1 });
+      }
+    }
 
     // "The video reaches a time" interactions on overlays on screen.
     if (this.rules.to > this.rules.from)

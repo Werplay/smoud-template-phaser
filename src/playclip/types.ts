@@ -117,6 +117,12 @@ export interface PlayclipAsset {
   clipId?: string;
   /** Shown with the end card (global, timed with it after the clip that ends the ad). */
   onEndCard?: boolean;
+  /** On the start card: shown until the first tap; the value is what it does (animation/start-card.ts). */
+  onStartCard?: 'start' | 'interact';
+  /** An image's picture in other languages, by code (animation/locale.ts). */
+  images?: Record<string, string>;
+  /** A text's font in other languages, by code (animation/locale.ts). */
+  fontsByLang?: Record<string, string>;
   /** Text in other languages, by code (animation/locale.ts). */
   texts?: Record<string, string>;
 }

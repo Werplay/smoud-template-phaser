@@ -1,5 +1,6 @@
 // Localization (PlayClip Phase 2): text and button assets can carry their
-// text in other languages (`texts`, by language code). One project exports
+// text in other languages (`texts`, by language code), images their picture
+// (`images`) and texts their font (`fontsByLang`). One project exports
 // every language: fixed at export (the texts are resolved before the build),
 // or picked by the device at runtime (the Phaser export). The asset's own
 // `content` is the base language and the fallback.
@@ -7,6 +8,10 @@
 export interface Localizable {
   content?: string;
   texts?: Record<string, string>;
+  imageUrl?: string;
+  images?: Record<string, string>;
+  fontsByLang?: Record<string, string>;
+  style?: unknown;
 }
 
 const norm = (code: string) => code.trim().toLowerCase().replace('_', '-');
@@ -32,19 +37,49 @@ export function pickLanguage(available: readonly string[], wanted: readonly stri
 export const textIn = (x: Localizable, lang: string | null): string =>
   (lang && x.texts?.[lang]?.trim() ? x.texts[lang] : x.content) ?? '';
 
-/** The languages used anywhere in `items`, in first-seen order. */
+/** The languages used anywhere in `items` (texts, images, fonts), in first-seen order. */
 export function languagesOf(items: readonly Localizable[]): string[] {
   const out: string[] = [];
-  for (const x of items) for (const k of Object.keys(x.texts ?? {})) if (!out.includes(k)) out.push(k);
+  for (const x of items)
+    for (const k of [...Object.keys(x.texts ?? {}), ...Object.keys(x.images ?? {}), ...Object.keys(x.fontsByLang ?? {})])
+      if (!out.includes(k)) out.push(k);
   return out;
 }
 
-/** `items` showing `lang` (null = the base), without translations left in. */
+const filled = (map: Record<string, string> | undefined, lang: string | null) =>
+  lang && map?.[lang]?.trim() ? map[lang] : null;
+
+/** `style` (flat or per orientation) with its fontFamily set to `font`. */
+function withFont(style: unknown, font: string): unknown {
+  if (!style || typeof style !== 'object') return { fontFamily: font };
+  const s = style as Record<string, unknown>;
+  if ('landscape' in s && 'portrait' in s)
+    return {
+      ...s,
+      landscape: { ...(s.landscape as object), fontFamily: font },
+      portrait: { ...(s.portrait as object), fontFamily: font },
+    };
+  return { ...s, fontFamily: font };
+}
+
+/**
+ * `items` showing `lang` (null = the base), without translations left in:
+ * its text, its image and its font in `lang` where set (an empty one falls
+ * back to the base).
+ */
 export function localize<T extends Localizable>(items: readonly T[], lang: string | null): T[] {
   return items.map((x) => {
-    if (!x.texts) return x;
-    const { texts: _texts, ...rest } = x;
-    void _texts;
-    return { ...rest, content: textIn(x, lang) } as T;
+    if (!x.texts && !x.images && !x.fontsByLang) return x;
+    const { texts: _t, images: _i, fontsByLang: _f, ...rest } = x;
+    void _t;
+    void _i;
+    void _f;
+    const out: Record<string, unknown> = { ...rest };
+    if (x.texts) out.content = textIn(x, lang);
+    const image = filled(x.images, lang);
+    if (image) out.imageUrl = image;
+    const font = filled(x.fontsByLang, lang);
+    if (font) out.style = withFont(x.style, font);
+    return out as T;
   });
 }
