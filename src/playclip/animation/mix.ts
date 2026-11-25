@@ -20,11 +20,6 @@ export interface AudioTrack {
   pan?: number;
   mute?: boolean;
   solo?: boolean;
-  /**
-   * Only the first active clip on the track sounds (how every project played
-   * before tracks existed; set on the track old projects migrate into).
-   */
-  exclusive?: boolean;
 }
 
 export interface AudioMix {
@@ -87,12 +82,13 @@ export const numOr = (v: unknown, fallback: number): number => {
 
 export const newTrack = (id: string, name: string): AudioTrack => ({ id, name, gainDb: 0 });
 
-/** The mix of a project saved before tracks: the video plus one exclusive track. */
+/**
+ * The mix of a project saved before tracks: the video plus one audio track.
+ * Every clip plays, overlapping ones together (before the mixer only the
+ * first of overlapping clips sounded).
+ */
 export const legacyMix = (): AudioMix => ({
-  tracks: [
-    newTrack(VIDEO_TRACK, 'Video'),
-    { ...newTrack(FIRST_AUDIO_TRACK, 'Audio 1'), exclusive: true },
-  ],
+  tracks: [newTrack(VIDEO_TRACK, 'Video'), newTrack(FIRST_AUDIO_TRACK, 'Audio 1')],
   masterDb: 0,
 });
 
@@ -116,34 +112,12 @@ export function normalizeMix(saved: Partial<AudioMix> | null | undefined): Audio
     if (pan) track.pan = Math.max(-1, Math.min(1, pan));
     if (t.mute) track.mute = true;
     if (t.solo) track.solo = true;
-    if (t.exclusive && t.id !== VIDEO_TRACK) track.exclusive = true;
     tracks.push(track);
   }
   const videoAt = tracks.findIndex((t) => t.id === VIDEO_TRACK);
   const video = videoAt >= 0 ? tracks.splice(videoAt, 1)[0] : newTrack(VIDEO_TRACK, 'Video');
   if (!tracks.length) tracks.push(newTrack(FIRST_AUDIO_TRACK, 'Audio 1'));
   return { tracks: [video, ...tracks], masterDb: clampDb(saved.masterDb) };
-}
-
-/**
- * Whether two active clips on one track overlap in time (only then does an
- * exclusive track sound different from a normal one). `group` keeps clips of
- * different videos (multi-clip playables) apart.
- */
-export function hasOverlaps(
-  voices: readonly (MixVoice & { group?: string })[],
-  mix: AudioMix,
-): boolean {
-  const byTrack = new Map<string, MixVoice[]>();
-  for (const v of voices) {
-    if (v.isActive === false) continue;
-    const key = `${v.group ?? ''}|${trackIdOf(v, mix)}`;
-    const list = byTrack.get(key) ?? [];
-    for (const o of list) if (v.start < o.end && o.start < v.end) return true;
-    list.push(v);
-    byTrack.set(key, list);
-  }
-  return false;
 }
 
 /** The audio tracks (every track but the video's). */
@@ -208,17 +182,9 @@ export function voicesAt(
   state: MixState = {},
 ): ActiveVoice[] {
   const out: ActiveVoice[] = [];
-  const takenExclusive = new Set<string>();
-  const exclusive = new Set(mix.tracks.filter((x) => x.exclusive).map((x) => x.id));
   for (const v of voices) {
     if (v.isActive === false || t < v.start || t > v.end) continue;
     const trackId = trackIdOf(v, mix);
-    // Exclusive tracks: the first active clip wins, as it always did (even
-    // when a freeze then silences it, the later clip doesn't take over).
-    if (exclusive.has(trackId)) {
-      if (takenExclusive.has(trackId)) continue;
-      takenExclusive.add(trackId);
-    }
     if (state.frozen && v.playDuringFreeze !== true) continue;
     const speed = numOr(v.speed, 1) || 1;
     out.push({

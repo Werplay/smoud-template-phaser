@@ -174,7 +174,10 @@ export class AudioMixEngine {
     if (buffer) {
       this.buffers.set(id, buffer);
       this.stop(id); // restart from the new audio
-    } else this.buffers.delete(id);
+    } else {
+      this.buffers.delete(id);
+      console.warn(`PlayClip audio: couldn't ${bytes ? 'decode' : 'load'} the audio of "${id}"; it won't play.`);
+    }
     return !!buffer;
   }
 
@@ -293,7 +296,8 @@ export class AudioMixEngine {
       const track = this.track(v.trackId);
       if (!buffer || !track) continue;
       const dur = buffer.duration;
-      if (!v.loop && v.offset >= dur) continue;
+      // Played out (or all but a sliver: restarting that would just click).
+      if (!v.loop && v.offset >= dur - 0.05) continue;
       wanted.add(v.id);
       const pos = v.loop ? v.offset % dur : v.offset;
       const r = this.running.get(v.id);
