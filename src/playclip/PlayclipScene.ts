@@ -1818,10 +1818,14 @@ export class PlayclipScene extends Phaser.Scene {
     const frame = mixAt(voices, this.audioMix, t, { frozen });
     frame.master *= this.sdkVolume;
     this.audioEngine.sync(frame, { playing, hold: frozen });
-    this.applyVideoLevel(frame.tracks.get(VIDEO_TRACK) ?? 1);
+    // The master (SDK volume included) is global: it sets the video's sound too.
+    this.applyVideoLevel((frame.tracks.get(VIDEO_TRACK) ?? 1) * frame.master);
   }
 
-  /** The video's sound: on the video track once it needs a level, else ducked by muting (as before the mixer). */
+  /**
+   * The video's sound at `gain` (its track × the master): in the audio graph
+   * once it needs a level other than full, else muted at 0 or set by volume.
+   */
   private applyVideoLevel(gain: number): void {
     const v = this.video;
     if (!v) return;
@@ -1849,7 +1853,7 @@ export class PlayclipScene extends Phaser.Scene {
       v.setVolume(1);
       return;
     }
-    const vol = Math.min(1, gain) * this.sdkVolume;
+    const vol = Math.min(1, gain);
     if (Math.abs(v.getVolume() - vol) > 1e-3) v.setVolume(vol);
   }
 
