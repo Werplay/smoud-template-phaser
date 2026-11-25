@@ -535,7 +535,6 @@ export class PlayclipScene extends Phaser.Scene {
             fadeOut: aa.fadeOut,
             sourceOffset: aa.sourceOffset,
             isActive: aa.isActive,
-            muteVideo: aa.muteVideo,
             playDuringFreeze: aa.playDuringFreeze,
           },
         };

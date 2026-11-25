@@ -52,8 +52,6 @@ export interface MixVoice {
   sourceOffset?: number;
   /** false = the clip is switched off. */
   isActive?: boolean;
-  /** Default true: the video's sound is silenced while the clip plays. */
-  muteVideo?: boolean;
   playDuringFreeze?: boolean;
 }
 
@@ -235,22 +233,10 @@ export function voicesAt(
   return out;
 }
 
-/**
- * The video track's own multiplier from the clips at t: 0 while a sounding
- * clip silences the video (muteVideo, default on), else 1.
- */
-export function videoDuck(
-  voices: readonly MixVoice[],
-  active: readonly ActiveVoice[],
-): number {
-  const byId = new Map(voices.map((v) => [v.id, v]));
-  return active.some((a) => byId.get(a.id)?.muteVideo !== false) ? 0 : 1;
-}
-
 /** Everything the engine needs at t: the clips, every track's gain, master. */
 export interface MixFrame {
   voices: ActiveVoice[];
-  /** Track id → linear gain (video track already ducked). */
+  /** Track id → linear gain. */
   tracks: Map<string, number>;
   /** Track id → pan. */
   pans: Map<string, number>;
@@ -263,9 +249,8 @@ export function mixAt(
   t: number,
   state: MixState = {},
 ): MixFrame {
-  const active = voicesAt(voices, mix, t, state);
+  // Everything plays together: the video's sound is only ever set by its own track.
   const tracks = trackGains(mix);
-  tracks.set(VIDEO_TRACK, (tracks.get(VIDEO_TRACK) ?? 1) * videoDuck(voices, active));
   const pans = new Map(mix.tracks.map((x) => [x.id, x.pan ?? 0]));
-  return { voices: active, tracks, pans, master: masterGain(mix) };
+  return { voices: voicesAt(voices, mix, t, state), tracks, pans, master: masterGain(mix) };
 }
