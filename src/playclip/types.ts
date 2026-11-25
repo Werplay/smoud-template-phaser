@@ -2,6 +2,7 @@
 // These mirror the JSON produced by the editor's /api/export/json builder
 // (assets are wrapped as { id, type, values }), but only the fields the scene
 // actually consumes are typed here.
+import type { AudioMix } from './animation/mix';
 
 import type { GlowStyle, GradientStyle, ShadowStyle, StrokeStyle } from './animation/styles';
 
@@ -78,6 +79,9 @@ export interface AudioAction {
   isActive?: boolean;
   muteVideo?: boolean;       // When true (default), mutes video while this asset plays
   playDuringFreeze?: boolean; // When true, audio continues playing during a freeze control
+  fadeIn?: number;           // Seconds of fade at the clip's start (animation/mix.ts)
+  fadeOut?: number;          // Seconds of fade before its end
+  sourceOffset?: number;     // Seconds into the file where the clip starts
 }
 
 export type AssetType =
@@ -92,6 +96,8 @@ export type AssetType =
 
 export interface PlayclipAsset {
   id: string;
+  /** An audio clip's mixer track (animation/mix.ts); absent = the first audio track. */
+  trackId?: string;
   time: number;
   endTime: number;
   type: AssetType;
@@ -158,4 +164,6 @@ export interface PlayclipData {
   controls?: unknown;
   /** Multi-clip playables (animation/clips.ts); absent = a single video. */
   clips?: PlayclipClip[];
+  /** Audio tracks and levels (animation/mix.ts); absent = one track, one clip at a time. */
+  audioMix?: AudioMix | null;
 }

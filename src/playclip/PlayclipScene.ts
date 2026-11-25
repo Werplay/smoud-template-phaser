@@ -30,6 +30,8 @@ import {
   Vars,
 } from './animation/vars';
 import { clipIdOf, endCardShift, inClip, nextClipAfter, onEndCard } from './animation/clips';
+import { VIDEO_TRACK, mixAt, normalizeMix, type AudioMix, type MixVoice } from './animation/mix';
+import { AudioMixEngine } from './animation/audio-engine';
 import { languagesOf, localize, pickLanguage } from './animation/locale';
 import { TimelineRules } from './animation/timeline-rules';
 import {
@@ -401,11 +403,14 @@ export class PlayclipScene extends Phaser.Scene {
   // end hook, e.g. Mintegral's window.gameEnd()).
   private finished = false;
 
-  // Audio assets and their native HTMLAudioElement instances.
-  private audioAssets: PlayclipAsset[] = [];
-  private audioElements: Map<string, HTMLAudioElement> = new Map();
-  private currentAudioId: string | null = null;
+  // Audio: the mix (tracks and levels), each audio clip as the mixer sees
+  // it, and the WebAudio engine that plays them.
+  private audioMix: AudioMix = normalizeMix(null);
+  private mixVoices: { asset: PlayclipAsset; voice: MixVoice }[] = [];
+  private audioEngine = new AudioMixEngine();
   private videoMutedForAudio = false;
+  /** The network SDK's volume (0…1). */
+  private sdkVolume = 1;
 
   // Timeline controls (seek-based playback behaviour).
   private loops: Control[] = [];
@@ -509,17 +514,33 @@ export class PlayclipScene extends Phaser.Scene {
     this.useClip(this.clips[0]?.id ?? '');
     this.orientation = this.computeOrientation();
 
-    // Initialise audio assets — active ones with a URL, separate from visual overlays.
-    this.audioAssets = this.rawAssets().filter(
-      (a) => a.type === 'audio' && !!a.audioUrl && a.audioAction?.isActive !== false,
-    );
-    this.audioAssets.forEach((asset) => {
-      const el = new Audio(asset.audioUrl!);
-      el.volume = asset.audioAction?.volume ?? 0.5;
-      el.playbackRate = asset.audioAction?.speed ?? 1;
-      el.loop = asset.audioAction?.loop ?? false;
-      this.audioElements.set(asset.id, el);
-    });
+    // Audio clips: decoded now, played from the first tap (startPlayback).
+    // Absent mix = one track that plays one clip at a time, as before the mixer.
+    this.audioMix = normalizeMix(this.playclipData.audioMix);
+    this.mixVoices = this.rawAssets()
+      .filter((a) => a.type === 'audio' && !!a.audioUrl)
+      .map((asset) => {
+        const aa = (asset.audioAction ?? {}) as AudioAction;
+        return {
+          asset,
+          voice: {
+            id: asset.id,
+            trackId: asset.trackId,
+            start: asset.time,
+            end: asset.endTime || asset.time + 5,
+            volume: aa.volume,
+            speed: aa.speed,
+            loop: aa.loop,
+            fadeIn: aa.fadeIn,
+            fadeOut: aa.fadeOut,
+            sourceOffset: aa.sourceOffset,
+            isActive: aa.isActive,
+            muteVideo: aa.muteVideo,
+            playDuringFreeze: aa.playDuringFreeze,
+          },
+        };
+      });
+    for (const { asset } of this.mixVoices) void this.audioEngine.load(asset.id, asset.audioUrl);
 
     this.createVideo();
     this.createOverlays();
@@ -1556,6 +1577,8 @@ export class PlayclipScene extends Phaser.Scene {
   // the ad; later taps are routed to whatever interactive overlay was hit.
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
     this.idleHints.input(this.time.now);
+    // Sound needs a tap to start (iOS and autoplay rules).
+    void this.audioEngine.resume();
     if (!this.started) {
       this.startPlayback();
       return;
@@ -1680,7 +1703,8 @@ export class PlayclipScene extends Phaser.Scene {
     this.posterHeld = false;
     if (this.video) {
       this.video.setMute(false);
-      this.video.setVolume(typeof sdk.volume === 'number' ? sdk.volume : 1);
+      this.sdkVolume = typeof sdk.volume === 'number' ? sdk.volume : 1;
+      this.video.setVolume(this.sdkVolume);
       // Resume from the held poster frame (or start, if not ready yet).
       this.video.setPaused(false);
       if (this.videoReady && !this.video.isPlaying()) this.video.play(false);
@@ -1777,76 +1801,57 @@ export class PlayclipScene extends Phaser.Scene {
 
   // --- Audio playback -----------------------------------------------------
 
+  // The mixer (animation/mix.ts) says which clips sound and how loud at t;
+  // the engine (animation/audio-engine.ts) plays them through WebAudio, so
+  // levels work on iOS and clips on different tracks play together.
   private applyAudio(t: number): void {
-    if (!this.started) return;
-
-    const v = this.video;
-    const isFrozen = !!this.rules.freeze;
-    const videoPaused = v?.isPaused() ?? true;
-
-    // Find the first audio asset whose time window covers the current playhead.
-    const activeAsset = this.audioAssets.find(
-      (a) =>
-        this.inActiveClip(a) && t >= a.time && t <= (a.endTime || a.time + 5),
-    ) ?? null;
-
-    if (activeAsset) {
-      const activeEl = this.audioElements.get(activeAsset.id);
-      if (!activeEl) return;
-
-      // Stop any other audio that might be playing.
-      this.audioElements.forEach((el, id) => {
-        if (id !== activeAsset.id && !el.paused) {
-          el.pause();
-          el.currentTime = 0;
-        }
-      });
-
-      // Mute/unmute the video based on the active audio's muteVideo flag (default: mute).
-      // If the active audio opts out, restore the video even if we had muted it earlier.
-      if (activeAsset.audioAction?.muteVideo !== false) {
-        if (!this.videoMutedForAudio) {
-          v?.setMute(true);
-          this.videoMutedForAudio = true;
-        }
-      } else if (this.videoMutedForAudio) {
-        v?.setMute(false);
-        this.videoMutedForAudio = false;
-      }
-
-      this.currentAudioId = activeAsset.id;
-      // Keep volume and playback rate in sync with the asset value (may have changed).
-      activeEl.volume = (activeAsset.audioAction as AudioAction | undefined)?.volume ?? 0.5;
-      activeEl.playbackRate = (activeAsset.audioAction as AudioAction | undefined)?.speed ?? 1;
-
-      // Play when the video is running, or when frozen and playDuringFreeze is on.
-      const shouldPlay =
-        !videoPaused || (isFrozen && activeAsset.audioAction?.playDuringFreeze === true);
-
-      if (shouldPlay && activeEl.paused) {
-        const audioOffset = t - activeAsset.time;
-        if (audioOffset > 0 && isFinite(activeEl.duration) && audioOffset < activeEl.duration) {
-          activeEl.currentTime = audioOffset;
-        }
-        activeEl.play().catch(() => {});
-      } else if (!shouldPlay && !activeEl.paused) {
-        activeEl.pause();
-      }
-    } else {
-      // Nothing should be playing — stop all audio and restore video audio.
-      this.audioElements.forEach((el) => {
-        if (!el.paused) {
-          el.pause();
-          el.currentTime = 0;
-        }
-      });
-      this.currentAudioId = null;
-
-      if (this.videoMutedForAudio) {
-        v?.setMute(false);
-        this.videoMutedForAudio = false;
-      }
+    if (!this.started) {
+      this.audioEngine.stopAll();
+      return;
     }
+    const v = this.video;
+    const videoPaused = v?.isPaused() ?? true;
+    // A freeze holds the playhead: only clips that play during freezes sound,
+    // and they run on while it holds.
+    const frozen = !!this.rules.freeze && videoPaused;
+    const playing = !videoPaused || this.videoEnded || frozen;
+    const voices = this.mixVoices.filter((x) => this.inActiveClip(x.asset)).map((x) => x.voice);
+    const frame = mixAt(voices, this.audioMix, t, { frozen });
+    frame.master *= this.sdkVolume;
+    this.audioEngine.sync(frame, { playing, hold: frozen });
+    this.applyVideoLevel(frame.tracks.get(VIDEO_TRACK) ?? 1);
+  }
+
+  /** The video's sound: on the video track once it needs a level, else ducked by muting (as before the mixer). */
+  private applyVideoLevel(gain: number): void {
+    const v = this.video;
+    if (!v) return;
+    const el = (v as unknown as { video: HTMLVideoElement | null }).video;
+    if (el && this.audioEngine.videoRouted(el)) {
+      if (this.videoMutedForAudio) {
+        v.setMute(false);
+        this.videoMutedForAudio = false;
+      }
+      return;
+    }
+    if (gain <= 0) {
+      if (!this.videoMutedForAudio) {
+        v.setMute(true);
+        this.videoMutedForAudio = true;
+      }
+      return;
+    }
+    if (this.videoMutedForAudio) {
+      v.setMute(false);
+      this.videoMutedForAudio = false;
+    }
+    if (Math.abs(gain - 1) > 1e-3 && el && this.audioEngine.routeVideo(el)) {
+      // In the graph the master carries the SDK volume.
+      v.setVolume(1);
+      return;
+    }
+    const vol = Math.min(1, gain) * this.sdkVolume;
+    if (Math.abs(v.getVolume() - vol) > 1e-3) v.setVolume(vol);
   }
 
   // --- Per-frame & resize -------------------------------------------------
@@ -2154,9 +2159,12 @@ export class PlayclipScene extends Phaser.Scene {
   }
 
   setVolumeLevel(value: number): void {
+    this.sdkVolume = Math.max(0, Math.min(1, value));
     if (!this.video) return;
     if (value > 0 && this.started) this.video.setMute(false);
-    this.video.setVolume(value);
+    // In the audio graph, the master carries the SDK volume (applyAudio).
+    const el = (this.video as unknown as { video: HTMLVideoElement | null }).video;
+    this.video.setVolume(el && this.audioEngine.videoRouted(el) ? 1 : value);
   }
 
   shutdown(): void {
@@ -2164,10 +2172,6 @@ export class PlayclipScene extends Phaser.Scene {
     this.input.off('pointerdown', this.onPointerDown, this);
     this.input.off('pointermove', this.onPointerMove, this);
     this.input.off('pointerup', this.onPointerUp, this);
-    this.audioElements.forEach((el) => {
-      el.pause();
-      el.src = '';
-    });
-    this.audioElements.clear();
+    this.audioEngine.dispose();
   }
 }
