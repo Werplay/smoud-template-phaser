@@ -3,6 +3,7 @@ import { sdk } from '@smoud/playable-sdk';
 import { PLAYCLIP_DATA } from '../playclip-data';
 import { isEndcardVisible } from './endcard-visibility';
 import { rearmAtFreeze } from './freeze-rearm';
+import { playableVideoUrl, videoSupport } from './video-support';
 import { bindHeatmap, track } from './analytics';
 import { sampleAnimation, type AnimStyle } from './animation/sample';
 import { layerOf } from './animation/layers';
@@ -474,21 +475,25 @@ export class PlayclipScene extends Phaser.Scene {
     // (texture + dimensions) by create() — far more reliable than runtime
     // loadURL(), whose 'created' event only fires once playback begins.
     const v = this.playclipData.video || ({} as PlayclipData['video']);
-    if (v.videoSrc) {
-      this.videoKeys.default = 'clip_default';
-      this.load.video('clip_default', v.videoSrc, true);
-    }
-    if (v.portraitSrc) {
-      this.videoKeys.portrait = 'clip_portrait';
-      this.load.video('clip_portrait', v.portraitSrc, true);
-    }
-    if (v.landscapeSrc) {
-      this.videoKeys.landscape = 'clip_landscape';
-      this.load.video('clip_landscape', v.landscapeSrc, true);
-    }
+    // A source this device can't play (a VP9/HEVC/AV1 export) is skipped:
+    // queued, Phaser would throw here and the playable wouldn't start; the
+    // scene runs without that video instead (video-support.ts).
+    const support = videoSupport(this.sys.game.device.video.vp9);
+    const load = (key: string, src: string) => {
+      const url = playableVideoUrl(src, support);
+      if (url === null) {
+        console.warn(`PlayClip: this device can't play video ${key}; continuing without it`);
+        return false;
+      }
+      this.load.video(key, url, true);
+      return true;
+    };
+    if (v.videoSrc && load('clip_default', v.videoSrc)) this.videoKeys.default = 'clip_default';
+    if (v.portraitSrc && load('clip_portrait', v.portraitSrc)) this.videoKeys.portrait = 'clip_portrait';
+    if (v.landscapeSrc && load('clip_landscape', v.landscapeSrc)) this.videoKeys.landscape = 'clip_landscape';
     // Added clips: one file each, for every orientation.
     (this.playclipData.clips ?? []).slice(1).forEach((c) => {
-      if (c.src) this.load.video(clipKey(c.id), c.src, true);
+      if (c.src) load(clipKey(c.id), c.src);
     });
   }
 
@@ -1317,7 +1322,7 @@ export class PlayclipScene extends Phaser.Scene {
         graphics.clear();
         const fillColor = cssColorToInt(st.backgroundColor) ?? 0x6d28d9;
         const borderColor = cssColorToInt(st.borderColor);
-        const borderWidth = firstNumber(st.borderWidth, 2);
+        const borderWidth = firstNumber(st.borderWidth, 2) * scale;
         if (st.shadow || st.outerGlow || st.gradient) {
           // Layer styles: draw glow → shadow → fill (colour or gradient) →
           // border into a padded canvas; canvas shadows follow CSS box-shadow.
@@ -1594,7 +1599,7 @@ export class PlayclipScene extends Phaser.Scene {
     if (overlay) {
       // Hold, swipe and drag need the whole press; plain taps fire at once.
       if (needsPress(overlay.asset)) {
-        this.startPress(overlay, px, py);
+        this.startPress(overlay, pointer);
       } else {
         const count = this.tapCounter.tap(overlay.asset.id, this.time.now);
         this.activateButton(overlay, { kind: 'tap', count });
@@ -1644,9 +1649,16 @@ export class PlayclipScene extends Phaser.Scene {
     );
   }
 
-  private startPress(overlay: Overlay, px: number, py: number): void {
+  // The canvas draws at device pixels (Game.ts); gestures measure CSS px,
+  // so tap slop and swipe distance feel the same on every screen.
+  private get pixelRatio(): number {
+    return 1 / (this.scale.zoom || 1);
+  }
+
+  private startPress(overlay: Overlay, pointer: Phaser.Input.Pointer): void {
     this.endPress();
-    const p = new Press(px, py, this.time.now);
+    const r = this.pixelRatio;
+    const p = new Press(pointer.worldX / r, pointer.worldY / r, this.time.now);
     const timers = holdTimes(overlay.asset).map((ms) =>
       this.time.delayedCall(ms, () => {
         if (this.press?.p !== p || !p.still) return;
@@ -1665,9 +1677,10 @@ export class PlayclipScene extends Phaser.Scene {
   private onPointerMove(pointer: Phaser.Input.Pointer): void {
     const press = this.press;
     if (!press) return;
-    press.p.move(pointer.worldX, pointer.worldY, this.time.now);
+    const r = this.pixelRatio;
+    press.p.move(pointer.worldX / r, pointer.worldY / r, this.time.now);
     if (dropZoneOf(press.overlay.asset) && !press.p.still)
-      press.overlay.drag = { x: press.p.dx, y: press.p.dy };
+      press.overlay.drag = { x: press.p.dx * r, y: press.p.dy * r };
   }
 
   private onPointerUp(pointer: Phaser.Input.Pointer): void {
@@ -1677,7 +1690,8 @@ export class PlayclipScene extends Phaser.Scene {
     const { overlay, p } = press;
     const px = pointer.worldX;
     const py = pointer.worldY;
-    const result = p.end(px, py, this.time.now);
+    const r = this.pixelRatio;
+    const result = p.end(px / r, py / r, this.time.now);
     const zoneId = dropZoneOf(overlay.asset);
     if (zoneId && !p.still) {
       const zone = this.overlays.find((o) => o.asset.id === zoneId);
