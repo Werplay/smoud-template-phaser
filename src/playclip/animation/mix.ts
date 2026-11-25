@@ -127,6 +127,27 @@ export function normalizeMix(saved: Partial<AudioMix> | null | undefined): Audio
   return { tracks: [video, ...tracks], masterDb: clampDb(saved.masterDb) };
 }
 
+/**
+ * Whether two active clips on one track overlap in time (only then does an
+ * exclusive track sound different from a normal one). `group` keeps clips of
+ * different videos (multi-clip playables) apart.
+ */
+export function hasOverlaps(
+  voices: readonly (MixVoice & { group?: string })[],
+  mix: AudioMix,
+): boolean {
+  const byTrack = new Map<string, MixVoice[]>();
+  for (const v of voices) {
+    if (v.isActive === false) continue;
+    const key = `${v.group ?? ''}|${trackIdOf(v, mix)}`;
+    const list = byTrack.get(key) ?? [];
+    for (const o of list) if (v.start < o.end && o.start < v.end) return true;
+    list.push(v);
+    byTrack.set(key, list);
+  }
+  return false;
+}
+
 /** The audio tracks (every track but the video's). */
 export const audioTracks = (mix: AudioMix): AudioTrack[] =>
   mix.tracks.filter((t) => t.id !== VIDEO_TRACK);

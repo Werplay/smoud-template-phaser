@@ -39,6 +39,15 @@ const RAMP = 0.015;
 
 function createContext(): Ctx | null {
   if (typeof window === 'undefined') return null;
+  // iOS puts WebAudio in the "ambient" session, which the silent switch
+  // mutes, while <audio>/<video> keep playing. Ask for "playback" so clips
+  // behave like the media elements they replace (Safari 16.4+).
+  try {
+    const session = (navigator as unknown as { audioSession?: { type: string } }).audioSession;
+    if (session && session.type !== 'playback') session.type = 'playback';
+  } catch {
+    /* not supported */
+  }
   const w = window as unknown as {
     AudioContext?: typeof AudioContext;
     webkitAudioContext?: typeof AudioContext;
@@ -125,6 +134,11 @@ export class AudioMixEngine {
       }
     }
     return this.ctx;
+  }
+
+  /** A context exists already (nothing has been created by asking). */
+  get hasContext(): boolean {
+    return this.ctx != null;
   }
 
   get available(): boolean {
